@@ -87,13 +87,11 @@ void spec_set_u( t_species* spec, const int start, const int end )
      */
 
     // Initialize thermal component
-    unsigned int seed = omp_get_thread_num() + time(NULL) * (omp_get_thread_num() + 1);
-
-    #pragma omp for
+    
     for (int i = start; i <= end; i++) {
-        spec->part[i].ux = spec -> uth[0] * rand_norm_r(&seed);
-        spec->part[i].uy = spec -> uth[1] * rand_norm_r(&seed);
-        spec->part[i].uz = spec -> uth[2] * rand_norm_r(&seed);
+        spec->part[i].ux = spec -> uth[0] * rand_norm();
+        spec->part[i].uy = spec -> uth[1] * rand_norm();
+        spec->part[i].uz = spec -> uth[2] * rand_norm();
     }
 
     // Calculate net momentum in each cell
