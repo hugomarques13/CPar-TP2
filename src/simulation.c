@@ -185,12 +185,12 @@ void sim_report_energy( t_simulation* sim )
 
 	emf_get_energy( &sim -> emf, emf_energy );
 	double tot_emf = emf_energy[0];
-	for( i = 0; i < 6; i++ ){
+	for( i = 1; i < 6; i++ ){
 		tot_emf += emf_energy[i];
 	}
 
 	double tot_part = 0;
-	for( i = 0; i < sim -> n_species; i++ ){
+	for( i = 1; i < sim -> n_species; i++ ){
 		part_energy[i] = sim -> species[i].energy;
 		tot_part += part_energy[i];
 	}
