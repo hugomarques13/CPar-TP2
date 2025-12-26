@@ -103,36 +103,42 @@ void spec_set_u( t_species* spec, const int start, const int end )
     memset(npc, 0, (spec->nx) * sizeof(int) );
 
     // Accumulate momentum in each cell
-    #pragma omp parallel
-    {
-        #pragma omp for
-        for (int i = start; i <= end; i++) {
-            const int idx = spec->part[i].ix;
-            net_u[idx].x += spec->part[i].ux;
-            net_u[idx].y += spec->part[i].uy;
-            net_u[idx].z += spec->part[i].uz;
-            npc[idx] += 1;
-        }
+    #pragma omp parallel for
+    for (int i = start; i <= end; i++) {
+        const int idx = spec->part[i].ix;
 
-        // Normalize to the number of particles in each cell to get the
-        // average momentum in each cell
-        #pragma omp for
-        for(int i = 0; i < spec->nx; i++) {
-            const float norm = (npc[i] > 0) ? 1.0f/npc[i] : 0;
-            net_u[i].x *= norm;
-            net_u[i].y *= norm;
-            net_u[i].z *= norm;
-        }
+        #pragma omp atomic
+        net_u[idx].x += spec->part[i].ux;
+            
+        #pragma omp atomic
+        net_u[idx].y += spec->part[i].uy;
+            
+        #pragma omp atomic
+        net_u[idx].z += spec->part[i].uz;
+            
+        #pragma omp atomic
+        npc[idx] += 1;
+    }
+
+    // Normalize to the number of particles in each cell to get the
+    // average momentum in each cell
+    #pragma omp parallel for
+    for(int i = 0; i < spec->nx; i++) {
+        const float norm = (npc[i] > 0) ? 1.0f/npc[i] : 0;
+        net_u[i].x *= norm;
+        net_u[i].y *= norm;
+        net_u[i].z *= norm;
+    }
 
         // Subtract average momentum and add fluid component
-        #pragma omp for
-        for (int i = start; i <= end; i++) {
-            const int idx = spec->part[i].ix;
-            spec->part[i].ux += spec->ufl[0] - net_u[idx].x;
-            spec->part[i].uy += spec->ufl[1] - net_u[idx].y;
-            spec->part[i].uz += spec->ufl[2] - net_u[idx].z;
-        }
+    #pragma omp parallel for
+    for (int i = start; i <= end; i++) {
+        const int idx = spec->part[i].ix;
+        spec->part[i].ux += spec->ufl[0] - net_u[idx].x;
+        spec->part[i].uy += spec->ufl[1] - net_u[idx].y;
+        spec->part[i].uz += spec->ufl[2] - net_u[idx].z;
     }
+    
 
     // Free temporary memory
     free( npc );
@@ -729,10 +735,19 @@ void dep_current_zamb( int ix0, int di,
         float half_qvy = qvy * 0.5f;
         float half_qvz = qvz * 0.5f;
         
+        #pragma omp atomic
         J[ix0].x += qnx * dx;
+
+        #pragma omp atomic
         J[ix0].y += half_qvy * (S0x0 + S1x0 + (S0x0 - S1x0) * 0.5f);
+
+        #pragma omp atomic
         J[ix0 + 1].y += half_qvy * (S0x1 + S1x1 + (S0x1 - S1x1) * 0.5f);
+
+        #pragma omp atomic
         J[ix0].z += half_qvz * (S0x0 + S1x0 + (S0x0 - S1x0) * 0.5f);
+
+        #pragma omp atomic
         J[ix0 + 1].z += half_qvz * (S0x1 + S1x1 + (S0x1 - S1x1) * 0.5f);
         
         return;
@@ -758,10 +773,19 @@ void dep_current_zamb( int ix0, int di,
     float S1x0_p0 = 1.0f - x1_p0;
     float S1x1_p0 = x1_p0;
     
+    #pragma omp atomic
     J[ix0].x += qnx * dx_p0;
+
+    #pragma omp atomic
     J[ix0].y += qvy_p0 * (S0x0_p0 + S1x0_p0 + (S0x0_p0 - S1x0_p0) * 0.5f);
+
+    #pragma omp atomic
     J[ix0 + 1].y += qvy_p0 * (S0x1_p0 + S1x1_p0 + (S0x1_p0 - S1x1_p0) * 0.5f);
+
+    #pragma omp atomic
     J[ix0].z += qvz_p0 * (S0x0_p0 + S1x0_p0 + (S0x0_p0 - S1x0_p0) * 0.5f);
+
+    #pragma omp atomic
     J[ix0 + 1].z += qvz_p0 * (S0x1_p0 + S1x1_p0 + (S0x1_p0 - S1x1_p0) * 0.5f);
     
     // Deposit second particle
@@ -777,10 +801,19 @@ void dep_current_zamb( int ix0, int di,
     float S1x0_p1 = 1.0f - x1_p1;
     float S1x1_p1 = x1_p1;
     
+    #pragma omp atomic
     J[ix1].x += qnx * dx_p1;
+
+    #pragma omp atomic
     J[ix1].y += qvy_p1 * (S0x0_p1 + S1x0_p1 + (S0x0_p1 - S1x0_p1) * 0.5f);
+
+    #pragma omp atomic
     J[ix1 + 1].y += qvy_p1 * (S0x1_p1 + S1x1_p1 + (S0x1_p1 - S1x1_p1) * 0.5f);
+
+    #pragma omp atomic
     J[ix1].z += qvz_p1 * (S0x0_p1 + S1x0_p1 + (S0x0_p1 - S1x0_p1) * 0.5f);
+
+    #pragma omp atomic
     J[ix1 + 1].z += qvz_p1 * (S0x1_p1 + S1x1_p1 + (S0x1_p1 - S1x1_p1) * 0.5f);
 }
 
