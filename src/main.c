@@ -35,7 +35,7 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 //#include "input/lwfa.c"
 //#include "input/beam.c"
 //#include "input/laser.c"
-#include "../input/laser_particles.c"
+//#include "../input/laser_particles.c"
 //#include "input/absorbing.c"
 //#include "input/density.c"
 
