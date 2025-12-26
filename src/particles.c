@@ -581,7 +581,7 @@ void spec_new( t_species* spec, char name[], const float m_q, const int ppc,
     spec_inject_particles( spec, range );
 
     // Set default sorting frequency
-    spec -> n_sort = 16;
+    spec -> n_sort = 100000;
 
     // Default to periodic boundary condtions
     spec -> bc_type = PART_BC_PERIODIC;
