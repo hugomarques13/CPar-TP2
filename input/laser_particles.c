@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-#include "../src/simulation.h"
+#include "../simulation.h"
 
 void sim_init( t_simulation* sim ){
 
