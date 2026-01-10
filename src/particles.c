@@ -952,15 +952,38 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     int np_local = spec -> np / size;
     int offset = rank * np_local;
 
-    t_part* part_local = malloc(np_local * sizeof(t_part));
+    t_part* part_local = NULL;
+    if (np_local > 0) {
+        part_local = malloc(np_local * sizeof(t_part));
+        if (part_local == NULL) {
+            fprintf(stderr, "Error: Failed to allocate memory for part_local\n");
+            return;
+        }
+    }
 
-    MPI_Scatter(spec->part, np_local * sizeof(t_part), MPI_BYTE,
-                part_local, np_local * sizeof(t_part), MPI_BYTE,
-                0, MPI_COMM_WORLD
-            );
+    // Scatter particles to all ranks
+    int sendcount = np_local * sizeof(t_part);
+    if (rank == 0) {
+        MPI_Scatter(spec->part, sendcount, MPI_BYTE,
+                    part_local, sendcount, MPI_BYTE,
+                    0, MPI_COMM_WORLD
+                );
+    } else {
+        MPI_Scatter(NULL, sendcount, MPI_BYTE,
+                    part_local, sendcount, MPI_BYTE,
+                    0, MPI_COMM_WORLD
+                );
+    }
 
     t_current current_local;
-    current_local.J = calloc(nx0 + 1, sizeof(float3));
+    current_local.J = NULL;
+    if (nx0 > 0) {
+        current_local.J = calloc(nx0 + 1, sizeof(float3));
+        if (current_local.J == NULL) {
+            fprintf(stderr, "Error: Failed to allocate memory for current_local.J\n");
+            return;
+        }
+    }
 
     double energy_local = 0.0;
 
@@ -1069,9 +1092,17 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double energy_total = 0.0;
     MPI_Reduce(&energy_local, &energy_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Reduce(current_local.J, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (current_local.J != NULL) {
+        MPI_Reduce(current_local.J, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    } else {
+        float dummy[3] = {0.0f, 0.0f, 0.0f};
+        MPI_Reduce(dummy, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    }
 
-    MPI_Gather(part_local, np_local * sizeof(t_part), MPI_BYTE, spec->part, np_local * sizeof(t_part), MPI_BYTE, 0, MPI_COMM_WORLD);
+    if (part_local != NULL && np_local > 0) {
+        int recvcount = np_local * sizeof(t_part);
+        MPI_Gather(part_local, recvcount, MPI_BYTE, spec->part, recvcount, MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
 
     if (rank == 0) {
         // Store energy
@@ -1087,38 +1118,40 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     }
 
     free(part_local);
-    free(current_local.J);
+    if (current_local.J != NULL) {
+        free(current_local.J);
+    }
 
+    // Only process boundary conditions and sorting on rank 0 (master process)
+    if (rank == 0) {
+        // Check for particles leaving the box
+        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
-    /*
-    // Check for particles leaving the box
-    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+            // Move simulation window if needed
+            if (spec -> moving_window )	spec_move_window( spec );
 
-        // Move simulation window if needed
-        if (spec -> moving_window )	spec_move_window( spec );
-
-        // Use absorbing boundaries along x
-        int i = 0;
-        while ( i < spec -> np ) {
-            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                spec -> part[i] = spec -> part[ -- spec -> np ];
-                continue;
+            // Use absorbing boundaries along x
+            int i = 0;
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
+                    continue;
+                }
+                i++;
             }
-            i++;
+
+        } else {
+            // Use periodic boundaries in x
+            for (int i=0; i<spec->np; i++) {
+                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+            }
         }
 
-    } else {
-        // Use periodic boundaries in x
-        for (int i=0; i<spec->np; i++) {
-            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+        // Sort species at every n_sort time steps
+        if ( spec -> n_sort > 0 ) {
+            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
         }
     }
-
-    // Sort species at every n_sort time steps
-    if ( spec -> n_sort > 0 ) {
-        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
-    }
-    */
 
 }
 
