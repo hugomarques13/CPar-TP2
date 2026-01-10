@@ -9,7 +9,4 @@
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 
-module purge
-module load OpenMPI
-
-mpirun -np 2 ./zpic
+srun -np 2 ./zpic

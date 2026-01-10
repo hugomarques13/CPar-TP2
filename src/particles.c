@@ -920,9 +920,19 @@ int ltrim( float x )
  */
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
+    int rank, size;
+    MPI_Init(NULL, NULL);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     uint64_t t0;
-    t0 = timer_ticks();
+    if (rank == 0) t0 = timer_ticks();
+
+    MPI_Bcast(&spec->dt, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->m_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->nx, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     const float tem   = 0.5 * spec->dt/spec -> m_q;
     const float dt_dx = spec->dt / spec->dx;
@@ -932,10 +942,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const int nx0 = spec -> nx;
 
-    double energy = 0;
+    int np_local = spec -> np / size;
+    int offset = rank * np_local;
+
+    t_part* part_local = malloc(np_local * sizeof(t_part));
+
+    MPI_Scatter(spec->part, np_local * sizeof(t_part), MPI_BYTE,
+                part_local, np_local * sizeof(t_part), MPI_BYTE,
+                0, MPI_COMM_WORLD
+            );
+
+    t_current current_local;
+    current_local.J = calloc(nx0 + 1, sizeof(float3));
+
+    double energy_local = 0.0;
 
     // Advance particles
-    for (int i=0; i<spec->np; i++) {
+    for (int i=0; i < np_local; i++) {
 
         float3 Ep, Bp;
         float utx, uty, utz;
@@ -948,12 +971,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = spec -> part[i].ux;
-        uy = spec -> part[i].uy;
-        uz = spec -> part[i].uz;
+        ux = spec -> part_local[i].ux;
+        uy = spec -> part_local[i].uy;
+        uz = spec -> part_local[i].uz;
 
         // interpolate fields
-        interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
+        interpolate_fld( emf -> E_part, emf -> B_part, &part_local[i], &Ep, &Bp );
         // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
@@ -968,10 +991,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // Perform first half of the rotation
         // Get time centered gamma
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf( 1 + u2 );
+        gamma = sqrtf( 1.0f + u2 );
 
         // Accumulate time centered energy
-        energy += u2 / ( 1 + gamma );
+        energy_local += u2 / ( 1.0f + gamma );
 
         gtem = tem / gamma;
 
@@ -1001,16 +1024,16 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        spec -> part[i].ux = ux;
-        spec -> part[i].uy = uy;
-        spec -> part[i].uz = uz;
+        part_local[i].ux = ux;
+        part_local[i].uy = uy;
+        part_local[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
         dx = dt_dx * rg * ux;
 
-        x1 = spec -> part[i].x + dx;
+        x1 = part_local[i].x + dx;
 
         di = ltrim(x1);
 
@@ -1025,23 +1048,44 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // 				 qnx, qvy, qvz,
         // 				 current );
 
-        dep_current_zamb( spec -> part[i].ix, di,
-                         spec -> part[i].x, dx,
+        dep_current_zamb(part_local[i].ix, di,
+                         part_local[i].x, dx,
                          qnx, qvy, qvz,
-                         current );
+                         &current_local );
 
         // Store results
-        spec -> part[i].x = x1;
-        spec -> part[i].ix += di;
+        part_local[i].x = x1;
+        part_local[i].ix += di;
 
     }
 
-    // Store energy
-    spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
+    double energy_total = 0.0;
+    MPI_Reduce(&energy_local, &energy_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Advance internal iteration number
-    spec -> iter += 1;
+    MPI_Reduce(current_local.J, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
+    MPI_Gather(part_local, np_local * sizeof(t_part), MPI_BYTE, spec->part, np_local * sizeof(t_part), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        // Store energy
+        spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;   
+
+        // Advance internal iteration number
+        spec -> iter += 1;
+
+        // Timing info
+        _spec_npush += spec -> np;
+        _spec_time += timer_interval_seconds( t0, timer_ticks() );
+
+    }
+
+    free(part_local);
+    free(current_local.J);
+
+    MPI_Finalize();
+
+
+    /*
     // Check for particles leaving the box
     if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
@@ -1069,10 +1113,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     if ( spec -> n_sort > 0 ) {
         if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
     }
+    */
 
-    // Timing info
-    _spec_npush += spec -> np;
-    _spec_time += timer_interval_seconds( t0, timer_ticks() );
 }
 
 /*********************************************************************************************

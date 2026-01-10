@@ -1,6 +1,6 @@
 # GCC options
 CC = mpicc
-CFLAGS = -Ofast -g -std=c99 -pedantic -Wall -march=native -fno-omit-frame-pointer
+CFLAGS = -O3 -ffast-math -g -std=c99 -pedantic -Wall -fno-omit-frame-pointer
 #CFLAGS = -Kfast -std=c99 
 LDFLAGS = -lm
 
@@ -48,5 +48,7 @@ run: ./$(TARGET)
 
 clean:
 	@touch $(TARGET) $(OBJ)
+	clean:
+	rm -f $(TARGET) $(OBJ) slurm-*.out slurm-*.err
 	rm -f $(TARGET) $(OBJ)
 	rm -rf $(DOCSBASE)
