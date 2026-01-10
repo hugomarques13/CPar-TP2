@@ -30,7 +30,7 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 #include "timer.h"
 
 // Include Simulation parameters here
-#include "input/twostream.c"
+#include "../input/twostream.c"
 //#include "input/magnetized.c"
 //#include "input/lwfa.c"
 //#include "input/beam.c"
