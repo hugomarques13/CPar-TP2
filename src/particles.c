@@ -971,9 +971,9 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = spec -> part_local[i].ux;
-        uy = spec -> part_local[i].uy;
-        uz = spec -> part_local[i].uz;
+        ux = part_local[i].ux;
+        uy = part_local[i].uy;
+        uz = part_local[i].uz;
 
         // interpolate fields
         interpolate_fld( emf -> E_part, emf -> B_part, &part_local[i], &Ep, &Bp );
@@ -1068,7 +1068,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     if (rank == 0) {
         // Store energy
-        spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;   
+        spec -> energy = spec-> q * spec -> m_q * energy_total * spec -> dx;   
 
         // Advance internal iteration number
         spec -> iter += 1;

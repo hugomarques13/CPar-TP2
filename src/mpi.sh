@@ -9,4 +9,4 @@
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 
-srun -np 2 ./zpic
+srun ./zpic

@@ -48,7 +48,6 @@ run: ./$(TARGET)
 
 clean:
 	@touch $(TARGET) $(OBJ)
-	clean:
 	rm -f $(TARGET) $(OBJ) slurm-*.out slurm-*.err
 	rm -f $(TARGET) $(OBJ)
 	rm -rf $(DOCSBASE)
