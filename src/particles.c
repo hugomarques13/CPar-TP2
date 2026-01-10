@@ -27,6 +27,7 @@
 
 static double _spec_time = 0.0;
 static uint64_t _spec_npush = 0;
+static int _mpi_initialized = 0;  // Flag to track MPI initialization
 
 void spec_sort( t_species *spec );
 void spec_move_window( t_species *spec );
@@ -921,7 +922,13 @@ int ltrim( float x )
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     int rank, size;
-    MPI_Init(NULL, NULL);
+    
+    // Initialize MPI only once
+    if (!_mpi_initialized) {
+        MPI_Init(NULL, NULL);
+        _mpi_initialized = 1;
+    }
+    
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -1081,8 +1088,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     free(part_local);
     free(current_local.J);
-
-    MPI_Finalize();
 
 
     /*
