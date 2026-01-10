@@ -23,6 +23,8 @@
 #include "zdf.h"
 #include "timer.h"
 
+#include "mpi.h"
+
 static double _spec_time = 0.0;
 static uint64_t _spec_npush = 0;
 

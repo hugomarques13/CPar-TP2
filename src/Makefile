@@ -1,5 +1,5 @@
 # GCC options
-CC = gcc
+CC = mpicc
 CFLAGS = -Ofast -g -std=c99 -pedantic -Wall -march=native -fno-omit-frame-pointer
 #CFLAGS = -Kfast -std=c99 
 LDFLAGS = -lm
@@ -24,6 +24,8 @@ TARGET = zpic
 
 DOCSBASE = ../docs
 
+SBATCH_FILE = mpi.sh
+
 DOCS = $(DOCSBASE)/html/index.html
 
 OBJ = $(SOURCE:.c=.o)
@@ -41,8 +43,8 @@ $(TARGET) : $(OBJ)
 $(DOCS) : $(SOURCE)
 	@doxygen ./Doxyfile
 
-run: all
-	./$(TARGET)
+run: ./$(TARGET)
+	sbatch $(SBATCH_FILE)
 
 clean:
 	@touch $(TARGET) $(OBJ)
