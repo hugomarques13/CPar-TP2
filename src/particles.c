@@ -1092,34 +1092,16 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double energy_total = 0.0;
     MPI_Reduce(&energy_local, &energy_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Reduce currents from all processes to rank 0
     if (current_local.J != NULL) {
-        // Reduce: (nx0 + 1) elements of float3, which is 3 floats each
-        if (rank == 0) {
-            MPI_Reduce(MPI_IN_PLACE, (float*)current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-        } else {
-            MPI_Reduce((float*)current_local.J, NULL, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-        }
+        MPI_Reduce(current_local.J, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     } else {
-        // If this rank has no particles, send zeros
-        float3 *dummy_J = calloc(nx0 + 1, sizeof(float3));
-        if (dummy_J != NULL) {
-            if (rank == 0) {
-                MPI_Reduce(MPI_IN_PLACE, (float*)current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-            } else {
-                MPI_Reduce((float*)dummy_J, NULL, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-            }
-            free(dummy_J);
-        }
+        float dummy[3] = {0.0f, 0.0f, 0.0f};
+        MPI_Reduce(dummy, current->J, (nx0 + 1) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     }
 
-    // Gather particles back to rank 0
-    if (np_local > 0) {
+    if (part_local != NULL && np_local > 0) {
         int recvcount = np_local * sizeof(t_part);
         MPI_Gather(part_local, recvcount, MPI_BYTE, spec->part, recvcount, MPI_BYTE, 0, MPI_COMM_WORLD);
-    } else {
-        // Participate in gather even if this rank has no particles
-        MPI_Gather(NULL, 0, MPI_BYTE, spec->part, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
     }
 
     if (rank == 0) {
