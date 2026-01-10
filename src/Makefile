@@ -1,6 +1,6 @@
 # GCC options
 CC = gcc
-CFLAGS = -Ofast -g -std=c99 -pedantic -Wall
+CFLAGS = -Ofast -g -std=c99 -pedantic -Wall -march=native -fno-omit-frame-pointer
 #CFLAGS = -Kfast -std=c99 
 LDFLAGS = -lm
 
@@ -22,13 +22,13 @@ SOURCE = current.c emf.c particles.c random.c timer.c main.c simulation.c zdf.c
 
 TARGET = zpic
 
-DOCSBASE = docs
+DOCSBASE = ../docs
 
 DOCS = $(DOCSBASE)/html/index.html
 
 OBJ = $(SOURCE:.c=.o)
 
-all : $(SOURCE) $(TARGET)
+all : $(TARGET)
 
 docs : $(DOCS)
 
@@ -40,6 +40,9 @@ $(TARGET) : $(OBJ)
 
 $(DOCS) : $(SOURCE)
 	@doxygen ./Doxyfile
+
+run: all
+	./$(TARGET)
 
 clean:
 	@touch $(TARGET) $(OBJ)
