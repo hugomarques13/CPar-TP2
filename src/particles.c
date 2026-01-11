@@ -895,18 +895,6 @@ int ltrim( float x )
     return ( x >= 1.0f ) - ( x < 0.0f );
 }
 
-// Custom MPI type for particle parameters
-typedef struct {
-    float3 *emf_E_part;
-    float3 *emf_B_part;
-    float spec_q;
-    int spec_np;
-    float tem;
-    float dt_dx;
-    float qnx;
-    int nx;
-} t_particle_params;
-
 /**
  * @brief Advance Particle species 1 timestep
  * 
@@ -926,267 +914,87 @@ typedef struct {
  * @param current   Current density
  */
 
-/**
- * @brief Advance Particle species 1 timestep
- */
+
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Status status;
 
-    // SPECIAL CASE: If only 1 process, run the original serial code
-    if (size == 1) {
-        uint64_t t0 = timer_ticks();
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-        const float tem   = 0.5 * spec->dt/spec -> m_q;
-        const float dt_dx = spec->dt / spec->dx;
+    uint64_t t0;
+    t0 = timer_ticks();
 
-        // Auxiliary values for current deposition
-        const float qnx = spec -> q *  spec->dx / spec->dt;
+    const float tem   = 0.5 * spec->dt/spec -> m_q;
+    const float dt_dx = spec->dt / spec->dx;
 
-        const int nx0 = spec -> nx;
+    // Auxiliary values for current deposition
+    const float qnx = spec -> q *  spec->dx / spec->dt;
 
-        double energy = 0;
+    const int nx0 = spec -> nx;
 
-        // Advance particles
-        for (int i=0; i<spec->np; i++) {
+    float3 *emf_E_part = emf -> E_part;
+    float3 *emf_B_part = emf -> B_part;
 
-            float3 Ep, Bp;
-            float utx, uty, utz;
-            float ux, uy, uz, u2;
-            float gamma, rg, gtem, otsq;
+    float spec_q = spec -> q;
+    int spec_np = spec -> np;
 
-            float x1;
+    MPI_Bcast(tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-            int di;
-            float dx;
+    MPI_Bcast(nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-            // Load particle momenta
-            ux = spec -> part[i].ux;
-            uy = spec -> part[i].uy;
-            uz = spec -> part[i].uz;
+    MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-            // interpolate fields
-            interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
+    MPI_Bcast(spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-            // advance u using Boris scheme
-            Ep.x *= tem;
-            Ep.y *= tem;
-            Ep.z *= tem;
 
-            utx = ux + Ep.x;
-            uty = uy + Ep.y;
-            utz = uz + Ep.z;
+    int local_np = spec_np / size;
 
-            // Perform first half of the rotation
-            // Get time centered gamma
-            u2 = utx*utx + uty*uty + utz*utz;
-            gamma = sqrtf( 1 + u2 );
+    // Store part in a local variable to avoid sending all of spec
+    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
 
-            // Accumulate time centered energy - EXACT ORIGINAL FORMULA
-            energy += u2 / ( 1 + gamma );
+    MPI_Scatter(spec->part, local_np * sizeof(t_part), MPI_BYTE,
+                local_part, local_np * sizeof(t_part), MPI_BYTE,
+                0, MPI_COMM_WORLD);
 
-            gtem = tem / gamma;
-
-            Bp.x *= gtem;
-            Bp.y *= gtem;
-            Bp.z *= gtem;
-
-            otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
-
-            ux = utx + uty*Bp.z - utz*Bp.y;
-            uy = uty + utz*Bp.x - utx*Bp.z;
-            uz = utz + utx*Bp.y - uty*Bp.x;
-
-            // Perform second half of the rotation
-
-            Bp.x *= otsq;
-            Bp.y *= otsq;
-            Bp.z *= otsq;
-
-            utx += uy*Bp.z - uz*Bp.y;
-            uty += uz*Bp.x - ux*Bp.z;
-            utz += ux*Bp.y - uy*Bp.x;
-
-            // Perform second half of electric field acceleration
-            ux = utx + Ep.x;
-            uy = uty + Ep.y;
-            uz = utz + Ep.z;
-
-            // Store new momenta
-            spec -> part[i].ux = ux;
-            spec -> part[i].uy = uy;
-            spec -> part[i].uz = uz;
-
-            // push particle
-            rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
-
-            dx = dt_dx * rg * ux;
-
-            x1 = spec -> part[i].x + dx;
-
-            di = ltrim(x1);
-
-            x1 -= di;
-
-            float qvy = spec->q * uy * rg;
-            float qvz = spec->q * uz * rg;
-
-            dep_current_zamb( spec -> part[i].ix, di,
-                             spec -> part[i].x, dx,
-                             qnx, qvy, qvz,
-                             current->J );
-
-            // Store results
-            spec -> part[i].x = x1;
-            spec -> part[i].ix += di;
-
-        }
-
-        // Store energy
-        spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
-
-        // Advance internal iteration number
-        spec -> iter += 1;
-
-        // Check for particles leaving the box
-        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
-
-            // Move simulation window if needed
-            if (spec -> moving_window )	spec_move_window( spec );
-
-            // Use absorbing boundaries along x
-            int i = 0;
-            while ( i < spec -> np ) {
-                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                    spec -> part[i] = spec -> part[ -- spec -> np ];
-                    continue;
-                }
-                i++;
-            }
-
-        } else {
-            // Use periodic boundaries in x
-            for (int i=0; i<spec->np; i++) {
-                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
-            }
-        }
-
-        // Sort species at every n_sort time steps
-        if ( spec -> n_sort > 0 ) {
-            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
-        }
-
-        // Timing info
-        _spec_npush += spec -> np;
-        _spec_time += timer_interval_seconds( t0, timer_ticks() );
-        
-        return;
-    }
-
-    // ----- MPI VERSION (2+ processes) -----
-    uint64_t t0 = timer_ticks();
-
-    // ----- Broadcast simulation parameters -----
-    float tem, dt_dx, qnx, spec_q, spec_m_q, spec_dx;
-    int nx, total_np, iter;
+                
+    double energy = 0;
     
-    if (rank == 0) {
-        tem = 0.5f * spec->dt / spec->m_q;
-        dt_dx = spec->dt / spec->dx;
-        qnx = spec->q * spec->dx / spec->dt;
-        spec_q = spec->q;
-        spec_m_q = spec->m_q;
-        spec_dx = spec->dx;
-        nx = spec->nx;
-        total_np = spec->np;
-        iter = spec->iter;
-    }
-    
-    // Broadcast all parameters
-    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_m_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&nx, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&total_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    // Allocate local current buffer with guard cells (gc[0]=1, gc[1]=2)
+    int current_size = 1 + nx0 + 2;
+    float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
+    memset(local_J_buf, 0, current_size * sizeof(float3));
+    // Offset pointer like current->J does
+    float3 *local_J = local_J_buf + 1;
 
-    // ----- Calculate local particle distribution -----
-    int base_count = total_np / size;
-    int remainder = total_np % size;
-    int local_np = base_count + (rank < remainder ? 1 : 0);
-    
-    // Allocate local particle array
-    t_part *local_part = (t_part*)malloc(local_np * sizeof(t_part));
-    
-    // ----- Scatter particles -----
-    int *sendcounts = NULL, *displs = NULL;
-    if (rank == 0) {
-        sendcounts = (int*)malloc(size * sizeof(int));
-        displs = (int*)malloc(size * sizeof(int));
-        
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            int count = base_count + (i < remainder ? 1 : 0);
-            sendcounts[i] = count * sizeof(t_part);
-            displs[i] = offset * sizeof(t_part);
-            offset += count;
-        }
-    }
-    
-    // Scatter particles
-    MPI_Scatterv(rank == 0 ? spec->part : NULL, sendcounts, displs, MPI_BYTE,
-                 local_part, local_np * sizeof(t_part), MPI_BYTE,
-                 0, MPI_COMM_WORLD);
-    
-    // ----- Broadcast EM fields -----
-    // IMPORTANT: Check the actual field array size from the code
-    // In original: emf->E_part and emf->B_part are used directly
-    // They should have size: nx + 3 (1 left + nx + 2 right)
-    int emf_size = nx + 3;
-    
-    float3 *local_E = (float3*)malloc(emf_size * sizeof(float3));
-    float3 *local_B = (float3*)malloc(emf_size * sizeof(float3));
-    
-    if (rank == 0) {
-        // Direct copy - assuming emf->E_part/B_part already have guard cells
-        memcpy(local_E, emf->E_part, emf_size * sizeof(float3));
-        memcpy(local_B, emf->B_part, emf_size * sizeof(float3));
-    }
-    
-    // Broadcast field arrays
-    MPI_Bcast(local_E, emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(local_B, emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    
-    // ----- Allocate local current buffer -----
-    // Current array needs same guard cells
-    float3 *local_J = (float3*)calloc(emf_size, sizeof(float3));
-    
-    // ----- Advance local particles (EXACT SAME LOGIC AS SERIAL) -----
-    double local_energy = 0.0;
-    
-    for (int i = 0; i < local_np; i++) {
+    // Advance particles
+    for (int i=0; i<local_np; i++) {
+
         float3 Ep, Bp;
         float utx, uty, utz;
         float ux, uy, uz, u2;
         float gamma, rg, gtem, otsq;
+
         float x1;
+
         int di;
-        float particle_dx;
+        float dx;
 
         // Load particle momenta
         ux = local_part[i].ux;
         uy = local_part[i].uy;
         uz = local_part[i].uz;
 
-        // Interpolate fields - MUST use same interpolation as serial
-        interpolate_fld(local_E, local_B, &local_part[i], &Ep, &Bp);
+        // interpolate fields
+        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
+        // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
-        // Advance u using Boris scheme - EXACT SAME AS SERIAL
+        // advance u using Boris scheme
         Ep.x *= tem;
         Ep.y *= tem;
         Ep.z *= tem;
@@ -1198,10 +1006,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // Perform first half of the rotation
         // Get time centered gamma
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf(1.0f + u2);
+        gamma = sqrtf( 1 + u2 );
 
-        // Accumulate time centered energy - EXACT SAME FORMULA AS SERIAL
-        local_energy += u2 / (1.0f + gamma);
+        // Accumulate time centered energy
+        energy += u2 / ( 1 + gamma );
 
         gtem = tem / gamma;
 
@@ -1209,13 +1017,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         Bp.y *= gtem;
         Bp.z *= gtem;
 
-        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
+        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
 
         ux = utx + uty*Bp.z - utz*Bp.y;
         uy = uty + utz*Bp.x - utx*Bp.z;
         uz = utz + utx*Bp.y - uty*Bp.x;
 
         // Perform second half of the rotation
+
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
@@ -1234,110 +1043,99 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         local_part[i].uy = uy;
         local_part[i].uz = uz;
 
-        // Push particle - EXACT SAME AS SERIAL
+        // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
-        particle_dx = dt_dx * rg * ux;
-        x1 = local_part[i].x + particle_dx;
+
+        dx = dt_dx * rg * ux;
+
+        x1 = local_part[i].x + dx;
+
         di = ltrim(x1);
+
         x1 -= di;
+
+        float qvy = spec_q * uy * rg;
+        float qvz = spec_q * uz * rg;
+
+        // deposit current using Eskirepov method
+        // dep_current_esk( spec -> part[i].ix, di,
+        // 				 spec -> part[i].x, x1,
+        // 				 qnx, qvy, qvz,
+        // 				 current );
+
+        dep_current_zamb( local_part[i].ix, di,
+                         local_part[i].x, dx,
+                         qnx, qvy, qvz,
+                         local_J );
 
         // Store results
         local_part[i].x = x1;
         local_part[i].ix += di;
-        
-        // Apply periodic boundaries immediately (serial does this at the end)
-        // But we need correct ix for current deposition
-        if (local_part[i].ix < 0) local_part[i].ix += nx;
-        if (local_part[i].ix >= nx) local_part[i].ix -= nx;
 
-        // Deposit current - IMPORTANT: check if current->J points to guard cell offset
-        float qvy = spec_q * uy * rg;
-        float qvz = spec_q * uz * rg;
-        
-        // In serial: dep_current_zamb(spec->part[i].ix, di, spec->part[i].x, dx, qnx, qvy, qvz, current->J);
-        // current->J points to the first active cell (after left guard cell)
-        // So local_J + 1 should match
-        dep_current_zamb(local_part[i].ix, di,
-                        local_part[i].x,
-                        particle_dx,
-                        qnx, qvy, qvz,
-                        local_J + 1);
     }
-    
-    // ----- Reduce results -----
-    double total_energy;
-    MPI_Reduce(&local_energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-    
-    // Reduce current - all to root
-    MPI_Reduce(local_J, current->J_buf, emf_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-    
-    // ----- Gather particles back -----
-    int *recvcounts = NULL, *recvdispls = NULL;
-    if (rank == 0) {
-        recvcounts = (int*)malloc(size * sizeof(int));
-        recvdispls = (int*)malloc(size * sizeof(int));
-        
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            int count = base_count + (i < remainder ? 1 : 0);
-            recvcounts[i] = count * sizeof(t_part);
-            recvdispls[i] = offset * sizeof(t_part);
-            offset += count;
-        }
-    }
-    
-    MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
-                rank == 0 ? spec->part : NULL, recvcounts, recvdispls, MPI_BYTE,
-                0, MPI_COMM_WORLD);
-    
-    // ----- Cleanup -----
+
+    print("Rank %d deposited energy: %f \n", rank, energy);
+
+    double total_energy = (double) 0.0;
+    MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    print("rank deposied local_J_buf \n", local_J_buf[0].x);
+
+    if (rank==0)
+        print("J is before reduce: %f \n", current->J[0].x);
+
+    MPI_Reduce(local_J_buf, current->J, (1 + nx0 + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
+            spec->part, local_np * sizeof(t_part), MPI_BYTE,
+            0, MPI_COMM_WORLD);
+
+    free(local_J_buf);
     free(local_part);
-    free(local_E);
-    free(local_B);
-    free(local_J);
-    
-    if (rank == 0) {
-        free(sendcounts);
-        free(displs);
-        free(recvcounts);
-        free(recvdispls);
-        
-        // Update species state - EXACT SAME FORMULA AS SERIAL
-        spec->energy = spec_q * spec_m_q * total_energy * spec_dx;
-        spec->iter = iter + 1;
-        
-        // Apply boundary conditions - EXACT SAME AS SERIAL
-        if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
-            if (spec->moving_window) {
-                spec_move_window(spec);
+
+    if (rank==0)
+        print("J is after reduce: %f \n", current->J[0].x);
+
+    if (rank != 0) return;
+
+    // Store energy
+    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
+
+    // Advance internal iteration number
+    spec -> iter += 1;
+
+    // Check for particles leaving the box
+    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+
+        // Move simulation window if needed
+        if (spec -> moving_window )	spec_move_window( spec );
+
+        // Use absorbing boundaries along x
+        int i = 0;
+        while ( i < spec -> np ) {
+            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                spec -> part[i] = spec -> part[ -- spec -> np ];
+                continue;
             }
-            
-            int i = 0;
-            while (i < spec->np) {
-                if ((spec->part[i].ix < 0) || (spec->part[i].ix >= nx)) {
-                    spec->part[i] = spec->part[--spec->np];
-                    continue;
-                }
-                i++;
-            }
-        } else {
-            // Periodic boundaries
-            for (int i = 0; i < spec->np; i++) {
-                spec->part[i].ix += ((spec->part[i].ix < 0) ? nx : 0) - ((spec->part[i].ix >= nx) ? nx : 0);
-            }
+            i++;
         }
-        
-        // Sort if needed
-        if (spec->n_sort > 0 && !(spec->iter % spec->n_sort)) {
-            spec_sort(spec);
+
+    } else {
+        // Use periodic boundaries in x
+        for (int i=0; i<spec->np; i++) {
+            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
         }
-        
-        // Update timing
-        _spec_npush += spec->np;
-        _spec_time += timer_interval_seconds(t0, timer_ticks());
     }
+
+    // Sort species at every n_sort time steps
+    if ( spec -> n_sort > 0 ) {
+        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+    }
+
+    // Timing info
+    _spec_npush += spec -> np;
+    _spec_time += timer_interval_seconds( t0, timer_ticks() );
     
-    MPI_Barrier(MPI_COMM_WORLD);
 }
 /*********************************************************************************************
 
