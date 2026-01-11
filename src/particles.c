@@ -932,8 +932,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    uint64_t t0;
-    t0 = timer_ticks();
+    uint64_t t0 = timer_ticks();
 
     // ----- Broadcast simulation parameters -----
     float tem, dt_dx, qnx, spec_q, dt, m_q;
@@ -955,9 +954,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
                dt, m_q, tem, qnx, nx, total_np);
     }
     
-    // Broadcast all scalar parameters
-    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_nx, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    // Broadcast all parameters
+    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&dt, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&m_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
@@ -991,14 +991,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // ----- Scatter particles -----
     int *sendcounts = NULL, *displs = NULL;
     if (rank == 0) {
-        sendcounts = (int*) malloc(size * sizeof(int));
-        displs = (int*) malloc(size * sizeof(int));
+        sendcounts = (int*)malloc(size * sizeof(int));
+        displs = (int*)malloc(size * sizeof(int));
         
         int offset = 0;
         for (int i = 0; i < size; i++) {
-            int count = (spec_np / size) + (i < remainder ? 1 : 0);
-            sendcounts[i] = count;
-            displs[i] = offset;
+            int count = base_count + (i < remainder ? 1 : 0);
+            sendcounts[i] = count * sizeof(t_part);
+            displs[i] = offset * sizeof(t_part);
             offset += count;
         }
     }
@@ -1079,19 +1079,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     int local_particles_pushed = 0;
     
     for (int i = 0; i < local_np; i++) {
+        local_particles_pushed++;
+        
         float3 Ep, Bp;
-        float utx, uty, utz;
-        float ux, uy, uz, u2;
-        float gamma, rg, gtem, otsq;
-        float x1;
-        int di;
-        float dx;
-
-        // Load particle momenta
-        ux = local_part[i].ux;
-        uy = local_part[i].uy;
-        uz = local_part[i].uz;
-
+        
         // Interpolate fields
         interpolate_fld(local_E, local_B, &local_part[i], &Ep, &Bp);
         
@@ -1121,37 +1112,35 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
-
-        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
-
-        ux = utx + uty*Bp.z - utz*Bp.y;
-        uy = uty + utz*Bp.x - utx*Bp.z;
-        uz = utz + utx*Bp.y - uty*Bp.x;
-
-        // Perform second half of the rotation
+        
+        float otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
+        
+        float ux = utx + uty*Bp.z - utz*Bp.y;
+        float uy = uty + utz*Bp.x - utx*Bp.z;
+        float uz = utz + utx*Bp.y - uty*Bp.x;
+        
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
-
+        
         utx += uy*Bp.z - uz*Bp.y;
         uty += uz*Bp.x - ux*Bp.z;
         utz += ux*Bp.y - uy*Bp.x;
-
-        // Perform second half of electric field acceleration
+        
         ux = utx + Ep.x;
         uy = uty + Ep.y;
         uz = utz + Ep.z;
-
-        // Store new momenta
+        
+        // Store new velocities
         local_part[i].ux = ux;
         local_part[i].uy = uy;
         local_part[i].uz = uz;
-
+        
         // Push particle
-        rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
-        dx = dt_dx * rg * ux;
-        x1 = local_part[i].x + dx;
-        di = ltrim(x1);
+        float rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
+        float particle_dx = dt_dx * rg * ux;
+        float x1 = local_part[i].x + particle_dx;
+        int di = ltrim(x1);
         x1 -= di;
         
         // Update particle
@@ -1219,16 +1208,15 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         
         int offset = 0;
         for (int i = 0; i < size; i++) {
-            int count = (spec_np / size) + (i < remainder ? 1 : 0);
-            recvcounts[i] = count;
-            recvdispls[i] = offset;
+            int count = base_count + (i < remainder ? 1 : 0);
+            recvcounts[i] = count * sizeof(t_part);
+            recvdispls[i] = offset * sizeof(t_part);
             offset += count;
         }
     }
     
-    // Gather particles back to root
-    MPI_Gatherv(local_part, local_np, mpi_part,
-                spec->part, recvcounts, recvdispls, mpi_part,
+    MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
+                rank == 0 ? spec->part : NULL, recvcounts, recvdispls, MPI_BYTE,
                 0, MPI_COMM_WORLD);
     
     // ----- Cleanup and finalize -----
@@ -1236,10 +1224,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     free(local_E);
     free(local_B);
     free(local_J);
-    free(local_E_part);
-    free(local_B_part);
     
     if (rank == 0) {
+        free(sendcounts);
+        free(displs);
         free(recvcounts);
         free(recvdispls);
         
@@ -1252,13 +1240,13 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         
         // Apply boundary conditions (should already be done locally, but double-check)
         if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
-            // Move simulation window if needed
-            if (spec->moving_window) spec_move_window(spec);
-
-            // Use absorbing boundaries along x
+            if (spec->moving_window) {
+                spec_move_window(spec);
+            }
+            
             int i = 0;
             while (i < spec->np) {
-                if ((spec->part[i].ix < 0) || (spec->part[i].ix >= nx0)) {
+                if ((spec->part[i].ix < 0) || (spec->part[i].ix >= nx)) {
                     spec->part[i] = spec->part[--spec->np];
                     continue;
                 }
@@ -1267,16 +1255,17 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         } else {
             // Periodic boundaries - ensure all particles are within bounds
             for (int i = 0; i < spec->np; i++) {
-                spec->part[i].ix += ((spec->part[i].ix < 0) ? nx0 : 0) - ((spec->part[i].ix >= nx0) ? nx0 : 0);
+                while (spec->part[i].ix < 0) spec->part[i].ix += nx;
+                while (spec->part[i].ix >= nx) spec->part[i].ix -= nx;
             }
         }
-
-        // Sort species at every n_sort time steps
-        if (spec->n_sort > 0) {
-            if (!(spec->iter % spec->n_sort)) spec_sort(spec);
+        
+        // Sort if needed
+        if (spec->n_sort > 0 && !(spec->iter % spec->n_sort)) {
+            spec_sort(spec);
         }
-
-        // Timing info (only on root)
+        
+        // Update timing
         _spec_npush += spec->np;
         _spec_time += timer_interval_seconds(t0, timer_ticks());
         
