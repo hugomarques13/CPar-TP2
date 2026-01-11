@@ -44,7 +44,8 @@ int main (int argc, char ** argv) {
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-	// Initialize simulation
+
+	// Initialize simulation (all ranks need this for MPI collectives)
 	t_simulation sim;
 	sim_init( &sim );
 
@@ -53,38 +54,39 @@ int main (int argc, char ** argv) {
 	float t;
     double en_in, en_out;
     
-	printf("Starting simulation ...\n\n");
+	if (rank == 0) printf("Starting simulation ...\n\n");
 
 	uint64_t t0,t1;
 	t0 = timer_ticks();
-    printf("n = 0, t = 0.0\n");
+    if (rank == 0) printf("n = 0, t = 0.0\n");
 
 	for (n=0,t=0.0; t<=sim.tmax; n++, t=n*sim.dt) {
         //printf("n = %i, t = %f\n",n,t);
 
-		if ( report ( n , sim.ndump ) )	sim_report( &sim );
+		if (rank == 0 && report ( n , sim.ndump ) ) sim_report( &sim );
 
 		sim_iter( &sim );
 
-        if (n==0){
+        if (n==0 && rank == 0){
             sim_report_energy_ret( &sim, &en_in);
             sim_report_energy (&sim);
         }
 	}
-    printf("n = %i, t = %f\n",n,t);
-
-	t1 = timer_ticks();
-	fprintf(stderr, "\nSimulation ended.\n\n");
-    sim_report_energy( &sim );
-    sim_report_energy_ret( &sim, &en_out );
-    printf("Initial energy: %e, Final energy: %e\n", en_in, en_out);
-    double ratio=100*fabs((en_in-en_out)/en_out);
-    printf("\nFinal energy different from Initial Energy. Change in total energy is: %.2f %% \n",ratio);
-    if (ratio>5) { printf("ERROR: Large Change\n"); return 1; }
-
-
-	// Simulation times
-    sim_timings( &sim, t0, t1 );
+    
+    if (rank == 0) {
+        printf("n = %i, t = %f\n",n,t);
+        t1 = timer_ticks();
+        fprintf(stderr, "\nSimulation ended.\n\n");
+        sim_report_energy( &sim );
+        sim_report_energy_ret( &sim, &en_out );
+        printf("Initial energy: %e, Final energy: %e\n", en_in, en_out);
+        double ratio=100*fabs((en_in-en_out)/en_out);
+        printf("\nFinal energy different from Initial Energy. Change in total energy is: %.2f %% \n",ratio);
+        if (ratio>5) { printf("ERROR: Large Change\n"); sim_delete( &sim ); MPI_Finalize(); return 1; }
+        
+        // Simulation times
+        sim_timings( &sim, t0, t1 );
+    }
     
     // Cleanup data
     sim_delete( &sim );

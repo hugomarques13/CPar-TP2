@@ -1111,6 +1111,11 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     free(local_E_buf);
     free(local_B_buf);
 
+    // Only rank 0 should do post-processing
+    if (rank != 0) {
+        return;
+    }
+
     // Store energy
     spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
 
