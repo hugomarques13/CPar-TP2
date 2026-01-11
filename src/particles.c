@@ -948,58 +948,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const int nx0 = spec -> nx;
 
-    // Turn it into a struct for Broadcast to avoid having 8 of them
-    t_particle_params params = {
-        .emf_E_part = emf -> E_part,
-        .emf_B_part = emf -> B_part,
-        .spec_q     = spec -> q,
-        .spec_np     = spec -> np,
-        .tem        = tem,
-        .dt_dx      = dt_dx,
-        .qnx        = qnx,
-        .nx         = spec -> nx
-    };
-
-    MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    // Divisão justa, último rank pode ficar com resto
-    int total_np = (int)params.spec_np;
-    int base_np = total_np / size;
-    int rem = total_np % size;
-    int *counts = (int*)malloc(size * sizeof(int));
-    int *displs = (int*)malloc(size * sizeof(int));
-    int sum = 0;
-    for (int i = 0; i < size; ++i) {
-        counts[i] = base_np + (i < rem ? 1 : 0);
-        displs[i] = sum;
-        sum += counts[i];
-    }
-    int local_np = counts[rank];
-    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-    MPI_Scatterv(
-        spec->part,
-        counts,
-        displs,
-        MPI_BYTE,
-        local_part,
-        local_np,
-        sizeof(t_part),
-        0,
-        MPI_COMM_WORLD
-    );
-
-                
     double energy = 0;
-    
-    // Allocate local current buffer with guard cells (gc[0]=1, gc[1]=2)
-    int current_size = 1 + params.nx + 2;
-    float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
-    memset(local_J_buf, 0, current_size * sizeof(float3));
-    // Offset pointer like current->J does
-    float3 *local_J = local_J_buf + 1;
 
     // Advance particles
-    for (int i=0; i<local_np; i++) {
+    for (int i=0; i<spec->np; i++) {
 
         float3 Ep, Bp;
         float utx, uty, utz;
@@ -1012,18 +964,18 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = local_part[i].ux;
-        uy = local_part[i].uy;
-        uz = local_part[i].uz;
+        ux = spec -> part[i].ux;
+        uy = spec -> part[i].uy;
+        uz = spec -> part[i].uz;
 
         // interpolate fields
-        interpolate_fld( params.emf_E_part, params.emf_B_part, &local_part[i], &Ep, &Bp );
+        interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
         // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
-        Ep.x *= params.tem;
-        Ep.y *= params.tem;
-        Ep.z *= params.tem;
+        Ep.x *= tem;
+        Ep.y *= tem;
+        Ep.z *= tem;
 
         utx = ux + Ep.x;
         uty = uy + Ep.y;
@@ -1037,7 +989,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // Accumulate time centered energy
         energy += u2 / ( 1 + gamma );
 
-        gtem = params.tem / gamma;
+        gtem = tem / gamma;
 
         Bp.x *= gtem;
         Bp.y *= gtem;
@@ -1065,23 +1017,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        local_part[i].ux = ux;
-        local_part[i].uy = uy;
-        local_part[i].uz = uz;
+        spec -> part[i].ux = ux;
+        spec -> part[i].uy = uy;
+        spec -> part[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
-        dx = params.dt_dx * rg * ux;
+        dx = dt_dx * rg * ux;
 
-        x1 = local_part[i].x + dx;
+        x1 = spec -> part[i].x + dx;
 
         di = ltrim(x1);
 
         x1 -= di;
 
-        float qvy = params.spec_q * uy * rg;
-        float qvz = params.spec_q * uz * rg;
+        float qvy = spec->q * uy * rg;
+        float qvz = spec->q * uz * rg;
 
         // deposit current using Eskirepov method
         // dep_current_esk( spec -> part[i].ix, di,
@@ -1089,80 +1041,54 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // 				 qnx, qvy, qvz,
         // 				 current );
 
-        dep_current_zamb( local_part[i].ix, di,
-                         local_part[i].x, dx,
-                         params.qnx, qvy, qvz,
-                         local_J );
+        dep_current_zamb( spec -> part[i].ix, di,
+                         spec -> part[i].x, dx,
+                         qnx, qvy, qvz,
+                         current );
 
         // Store results
-        local_part[i].x = x1;
-        local_part[i].ix += di;
+        spec -> part[i].x = x1;
+        spec -> part[i].ix += di;
 
     }
 
-    double total_energy = 0.0;
-    MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Store energy
+    spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
 
-    // Corrente: somar local_J_buf de todos os ranks
-    MPI_Reduce(local_J_buf, current->J_buf, current_size * sizeof(float3), MPI_BYTE, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Advance internal iteration number
+    spec -> iter += 1;
 
-    // Recolher partículas atualizadas
-    MPI_Gatherv(
-        local_part,
-        local_np,
-        sizeof(t_part),
-        spec->part,
-        counts,
-        displs,
-        MPI_BYTE,
-        0,
-        MPI_COMM_WORLD
-    );
-    free(counts);
-    free(displs);
+    // Check for particles leaving the box
+    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
-    free(local_J_buf);
-    free(local_part);
-    
-    if (rank == 0) {
-        // Store energy
-        spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
+        // Move simulation window if needed
+        if (spec -> moving_window )	spec_move_window( spec );
 
-        // Advance internal iteration number
-        spec -> iter += 1;
-
-        // Check for particles leaving the box
-        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
-
-            // Move simulation window if needed
-            if (spec -> moving_window )	spec_move_window( spec );
-
-            // Use absorbing boundaries along x
-            int i = 0;
-            while ( i < spec -> np ) {
-                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                    spec -> part[i] = spec -> part[ -- spec -> np ];
-                    continue;
-                }
-                i++;
+        // Use absorbing boundaries along x
+        int i = 0;
+        while ( i < spec -> np ) {
+            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                spec -> part[i] = spec -> part[ -- spec -> np ];
+                continue;
             }
-
-        } else {
-            // Use periodic boundaries in x
-            for (int i=0; i<spec->np; i++) {
-                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
-            }
+            i++;
         }
 
-        // Sort species at every n_sort time steps
-        if ( spec -> n_sort > 0 ) {
-            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+    } else {
+        // Use periodic boundaries in x
+        for (int i=0; i<spec->np; i++) {
+            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
         }
-
-        // Timing info
-        _spec_npush += spec -> np;
-        _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
+
+    // Sort species at every n_sort time steps
+    if ( spec -> n_sort > 0 ) {
+        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+    }
+
+    // Timing info
+    _spec_npush += spec -> np;
+    _spec_time += timer_interval_seconds( t0, timer_ticks() );
     
 }
 
