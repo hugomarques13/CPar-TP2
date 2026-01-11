@@ -940,17 +940,17 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     float spec_q = spec -> q;
     int spec_np = spec -> np;
 
-    MPI_Bcast(tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    MPI_Bcast(nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
     MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-    MPI_Bcast(spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
 
     int local_np = spec_np / size;
