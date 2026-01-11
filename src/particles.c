@@ -955,7 +955,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         .nx         = spec -> nx
     };
 
-    MPI_Broadcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     int local_np = params.spec_np / size;
 
