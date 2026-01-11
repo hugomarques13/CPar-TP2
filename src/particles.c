@@ -904,7 +904,6 @@ typedef struct {
     float tem;
     float dt_dx;
     float qnx;
-    float spec_q;
     int nx;
 } t_particle_params;
 
