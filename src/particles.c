@@ -928,14 +928,14 @@ typedef struct {
 static int _mpi_initialized = 0;
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
-    if (!_mpi_initialized) {
+    if (_mpi_initialized == 0) {
         MPI_Init(NULL, NULL);
         _mpi_initialized = 1;
-    }
 
-    int rank, size;
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
+        int rank, size;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+    }
 
     uint64_t t0;
     t0 = timer_ticks();
@@ -1094,7 +1094,9 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     free(local_J_buf);
     free(local_part);
-    MPI_Finalize();
+    if (_mpi_initialized == 1) {
+       MPI_Finalize(); 
+    }
     
     if (rank == 0) {
         // Store energy
