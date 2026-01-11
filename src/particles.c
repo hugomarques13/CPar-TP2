@@ -969,9 +969,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
                 
     double energy = 0;
     
-    // Allocate local current buffer
-    float3 *local_J = (float3*) malloc(params.nx * sizeof(float3));
-    memset(local_J, 0, params.nx * sizeof(float3));
+    // Allocate local current buffer with guard cells (gc[0]=1, gc[1]=2)
+    int current_size = 1 + params.nx + 2;
+    float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
+    memset(local_J_buf, 0, current_size * sizeof(float3));
+    // Offset pointer like current->J does
+    float3 *local_J = local_J_buf + 1;
 
     // Advance particles
     for (int i=0; i<local_np; i++) {
@@ -1078,13 +1081,13 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Reduce(local_J, current->J, params.nx * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_J_buf, current->J_buf, (1 + params.nx + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
             spec->part, local_np * sizeof(t_part), MPI_BYTE,
             0, MPI_COMM_WORLD);
 
-    free(local_J);
+    free(local_J_buf);
     free(local_part);
 
     // Store energy
