@@ -707,7 +707,7 @@ void dep_current_esk( int ix0, int di,
 void dep_current_zamb( int ix0, int di,
                         float x0, float dx,
                         float qnx, float qvy, float qvz,
-                        float3 *J )
+                        t_current *current )
 {
     // Split the particle trajectory
     typedef struct {
@@ -756,6 +756,9 @@ void dep_current_zamb( int ix0, int di,
         vnp++;
 
     }
+
+    // Deposit virtual particle currents
+    float3* restrict const J = current -> J;
 
     for (int k = 0; k < vnp; k++) {
         float S0x[2], S1x[2];
@@ -909,80 +912,64 @@ int ltrim( float x )
  * 3. Move simulation window
  * 4. Sort particle buffer
  * 
+ * MPI parallelization: particles are distributed among ranks, each rank
+ * deposits to a local current buffer, then results are reduced.
+ * 
  * @param spec      Particle species
  * @param emf       EM fields
  * @param current   Current density
  */
-
-
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
-    int rank, size;
-
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     uint64_t t0;
     t0 = timer_ticks();
 
-    // Rank 0 computes and broadcasts parameters
-    float tem, dt_dx, qnx, spec_q;
-    int spec_np, nx0;
-    
-    if (rank == 0) {
-        spec_np = spec->np;
-        nx0 = spec->nx;
-        tem   = 0.5 * spec->dt/spec -> m_q;
-        dt_dx = spec->dt / spec->dx;
-        qnx = spec -> q *  spec->dx / spec->dt;
-        spec_q = spec -> q;
-    }
+    const float tem   = 0.5 * spec->dt/spec -> m_q;
+    const float dt_dx = spec->dt / spec->dx;
 
-    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // Auxiliary values for current deposition
+    const float qnx = spec -> q *  spec->dx / spec->dt;
 
-    float3 *emf_E_part = emf -> E_part;
-    float3 *emf_B_part = emf -> B_part;
-
-    MPI_Bcast(emf_E_part, (nx0 + 1) * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, (nx0 + 1) * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
-    // Calculate how many particles each rank gets
-    int local_np = spec_np / size;
-    int remainder = spec_np % size;
-    if (rank < remainder) local_np++;
-
-    // Prepare scatter counts and displacements
-    int *sendcounts = (int*) malloc(size * sizeof(int));
-    int *displs = (int*) malloc(size * sizeof(int));
-    
-    int disp = 0;
-    for (int i = 0; i < size; i++) {
-        sendcounts[i] = (spec_np / size) + (i < remainder ? 1 : 0);
-        displs[i] = disp;
-        disp += sendcounts[i];
-    }
-
-    // Scatter particles
-    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
-                 local_part, local_np * sizeof(t_part), MPI_BYTE,
-                 0, MPI_COMM_WORLD);
-
-    // Setup local current buffer with guard cells
-    int current_size = current->gc[0] + current->nx + current->gc[1];
-    float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
-    memset(local_J_buf, 0, current_size * sizeof(float3));
-    float3 *local_J = local_J_buf + current->gc[0];
+    const int nx0 = spec -> nx;
 
     double energy = 0;
 
-    // Advance particles on this rank
-    for (int i=0; i<local_np; i++) {
+    // Get MPI rank and size
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // Calculate particle range for this rank
+    int np_total = spec->np;
+    int particles_per_rank = np_total / size;
+    int remainder = np_total % size;
+    
+    // Distribute remainder among first 'remainder' ranks
+    int start_idx = rank * particles_per_rank + (rank < remainder ? rank : remainder);
+    int end_idx = start_idx + particles_per_rank + (rank < remainder ? 1 : 0);
+
+    // Create local current buffer for this rank to avoid data races
+    // Size includes guard cells
+    int J_size = current->gc[0] + current->nx + current->gc[1];
+    float3 *local_J = (float3*) malloc(J_size * sizeof(float3));
+    
+    // Initialize local current buffer to zero
+    for (int j = 0; j < J_size; j++) {
+        local_J[j].x = 0.0f;
+        local_J[j].y = 0.0f;
+        local_J[j].z = 0.0f;
+    }
+
+    // Create a temporary current structure pointing to local buffer
+    t_current local_current = *current;
+    local_current.J_buf = local_J;
+    local_current.J = local_J + current->gc[0];  // Point to cell [0]
+
+    double local_energy = 0;
+
+    // Advance particles assigned to this rank
+    for (int i = start_idx; i < end_idx; i++) {
 
         float3 Ep, Bp;
         float utx, uty, utz;
@@ -995,12 +982,13 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = local_part[i].ux;
-        uy = local_part[i].uy;
-        uz = local_part[i].uz;
+        ux = spec -> part[i].ux;
+        uy = spec -> part[i].uy;
+        uz = spec -> part[i].uz;
 
         // interpolate fields
-        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
+        interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
+        // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
         Ep.x *= tem;
@@ -1012,11 +1000,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         utz = uz + Ep.z;
 
         // Perform first half of the rotation
+        // Get time centered gamma
         u2 = utx*utx + uty*uty + utz*utz;
         gamma = sqrtf( 1 + u2 );
 
         // Accumulate time centered energy
-        energy += u2 / ( 1 + gamma );
+        local_energy += u2 / ( 1 + gamma );
 
         gtem = tem / gamma;
 
@@ -1031,6 +1020,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + utx*Bp.y - uty*Bp.x;
 
         // Perform second half of the rotation
+
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
@@ -1045,94 +1035,146 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        local_part[i].ux = ux;
-        local_part[i].uy = uy;
-        local_part[i].uz = uz;
+        spec -> part[i].ux = ux;
+        spec -> part[i].uy = uy;
+        spec -> part[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
         dx = dt_dx * rg * ux;
 
-        x1 = local_part[i].x + dx;
+        x1 = spec -> part[i].x + dx;
 
         di = ltrim(x1);
 
         x1 -= di;
 
-        float qvy = spec_q * uy * rg;
-        float qvz = spec_q * uz * rg;
+        float qvy = spec->q * uy * rg;
+        float qvz = spec->q * uz * rg;
 
-        // deposit current
-        dep_current_zamb( local_part[i].ix, di,
-                         local_part[i].x, dx,
+        // deposit current using zamb method into local buffer (no data race)
+        // dep_current_esk( spec -> part[i].ix, di,
+        // 				 spec -> part[i].x, x1,
+        // 				 qnx, qvy, qvz,
+        // 				 &local_current );
+
+        dep_current_zamb( spec -> part[i].ix, di,
+                         spec -> part[i].x, dx,
                          qnx, qvy, qvz,
-                         local_J );
+                         &local_current );
 
         // Store results
-        local_part[i].x = x1;
-        local_part[i].ix += di;
+        spec -> part[i].x = x1;
+        spec -> part[i].ix += di;
+
     }
 
-    // Reduce currents back to rank 0
-    double total_energy = 0.0;
-    MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Reduce local current buffers to global current buffer
+    // Using MPI_Allreduce so all ranks have the complete current density
+    MPI_Allreduce(local_J, current->J_buf, J_size * 3, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 
-    MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Reduce energy across all ranks
+    MPI_Allreduce(&local_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-    // Gather particles back to rank 0
-    MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
-                 spec->part, sendcounts, displs, MPI_BYTE,
-                 0, MPI_COMM_WORLD);
+    // Free local current buffer
+    free(local_J);
 
-    free(local_part);
-    free(local_J_buf);
-    free(sendcounts);
+    // Synchronize particle data across all ranks
+    // Each rank has updated only its assigned particles, need to share updates
+    // Using MPI_Allgatherv to collect all particle updates
+    
+    // Calculate displacements and counts for each rank
+    int *recvcounts = (int*) malloc(size * sizeof(int));
+    int *displs = (int*) malloc(size * sizeof(int));
+    
+    for (int r = 0; r < size; r++) {
+        int r_particles = particles_per_rank + (r < remainder ? 1 : 0);
+        int r_start = r * particles_per_rank + (r < remainder ? r : remainder);
+        recvcounts[r] = r_particles;
+        displs[r] = r_start;
+    }
+
+    // Create MPI datatype for t_part structure
+    MPI_Datatype MPI_PARTICLE;
+    MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
+    MPI_Type_commit(&MPI_PARTICLE);
+
+    // Gather all particle updates - each rank sends its portion, all receive the complete array
+    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
+                   spec->part, recvcounts, displs, MPI_PARTICLE, MPI_COMM_WORLD);
+
+    MPI_Type_free(&MPI_PARTICLE);
+    free(recvcounts);
     free(displs);
 
-    if (rank != 0) return;
-
-    // Only rank 0 continues with boundary conditions and finalization
-    
     // Store energy
-    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
+    spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
 
     // Advance internal iteration number
     spec -> iter += 1;
 
+    // Boundary conditions and sorting are done by rank 0 and broadcast
+    // This ensures consistent particle array state across all ranks
+
     // Check for particles leaving the box
     if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
-        // Move simulation window if needed
-        if (spec -> moving_window )	spec_move_window( spec );
+        // Move simulation window if needed (rank 0 only to avoid duplicate work)
+        if (spec -> moving_window && rank == 0) spec_move_window( spec );
 
-        // Use absorbing boundaries along x
-        int i = 0;
-        while ( i < spec -> np ) {
-            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                spec -> part[i] = spec -> part[ -- spec -> np ];
-                continue;
+        // Use absorbing boundaries along x (all ranks do this identically)
+        if (rank == 0) {
+            int i = 0;
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
+                    continue;
+                }
+                i++;
             }
-            i++;
         }
 
     } else {
-        // Use periodic boundaries in x
+        // Use periodic boundaries in x (all ranks can do this identically)
         for (int i=0; i<spec->np; i++) {
             spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
         }
     }
 
+    // Synchronize np (number of particles) after boundary handling
+    MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // If particles were removed, synchronize the particle array from rank 0
+    if (spec -> moving_window || spec -> bc_type == PART_BC_OPEN) {
+        // Broadcast updated particle data from rank 0
+        MPI_Datatype MPI_PARTICLE_BC;
+        MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE_BC);
+        MPI_Type_commit(&MPI_PARTICLE_BC);
+        MPI_Bcast(spec->part, spec->np, MPI_PARTICLE_BC, 0, MPI_COMM_WORLD);
+        MPI_Type_free(&MPI_PARTICLE_BC);
+    }
+
     // Sort species at every n_sort time steps
     if ( spec -> n_sort > 0 ) {
-        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+        if ( ! (spec -> iter % spec -> n_sort) ) {
+            // Sorting done by rank 0 and broadcast
+            if (rank == 0) spec_sort( spec );
+            
+            // Broadcast sorted particle array
+            MPI_Datatype MPI_PARTICLE_SORT;
+            MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE_SORT);
+            MPI_Type_commit(&MPI_PARTICLE_SORT);
+            MPI_Bcast(spec->part, spec->np, MPI_PARTICLE_SORT, 0, MPI_COMM_WORLD);
+            MPI_Type_free(&MPI_PARTICLE_SORT);
+        }
     }
 
     // Timing info
     _spec_npush += spec -> np;
     _spec_time += timer_interval_seconds( t0, timer_ticks() );
-    
 }
+
 /*********************************************************************************************
 
  Charge Deposition
