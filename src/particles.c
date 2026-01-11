@@ -707,7 +707,7 @@ void dep_current_esk( int ix0, int di,
 void dep_current_zamb( int ix0, int di,
                         float x0, float dx,
                         float qnx, float qvy, float qvz,
-                        float3 *J )
+                        t_current *current )
 {
     // Split the particle trajectory
     typedef struct {
@@ -756,6 +756,9 @@ void dep_current_zamb( int ix0, int di,
         vnp++;
 
     }
+
+    // Deposit virtual particle currents
+    float3* restrict const J = current -> J;
 
     for (int k = 0; k < vnp; k++) {
         float S0x[2], S1x[2];
@@ -1036,7 +1039,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
             dep_current_zamb( spec -> part[i].ix, di,
                              spec -> part[i].x, dx,
                              qnx, qvy, qvz,
-                             current->J );
+                             current );
 
             // Store results
             spec -> part[i].x = x1;
@@ -1167,6 +1170,11 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     memset(local_J_buf, 0, current_size * sizeof(float3));
     // Offset pointer like current->J does
     float3 *local_J = local_J_buf + 1;
+    
+    // Create a temporary t_current structure for deposition
+    t_current local_current;
+    local_current.J = local_J;
+    local_current.J_buf = local_J_buf;
 
     // Advance particles
     for (int i=0; i<local_np; i++) {
@@ -1262,7 +1270,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         dep_current_zamb( local_part[i].ix, di,
                          local_part[i].x, dx,
                          params.qnx, qvy, qvz,
-                         local_J );
+                         &local_current );
 
         // Store results
         local_part[i].x = x1;
