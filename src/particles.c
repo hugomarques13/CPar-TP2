@@ -963,21 +963,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     // Divisão justa, último rank pode ficar com resto
-    int base_np = params.spec_np / size;
-    int rem = params.spec_np % size;
-    int local_np = base_np + (rank < rem ? 1 : 0);
-    int offset = rank * base_np + (rank < rem ? rank : rem);
-
+    int total_np = (int)params.spec_np;
+    int base_np = total_np / size;
+    int rem = total_np % size;
+    int *counts = (int*)malloc(size * sizeof(int));
+    int *displs = (int*)malloc(size * sizeof(int));
+    int sum = 0;
+    for (int i = 0; i < size; ++i) {
+        counts[i] = base_np + (i < rem ? 1 : 0);
+        displs[i] = sum;
+        sum += counts[i];
+    }
+    int local_np = counts[rank];
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-    // Distribuir partículas manualmente para suportar divisão não uniforme
     MPI_Scatterv(
         spec->part,
-        (int[]){
-            [0 ... size-1] = base_np,
-        },
-        (int[]){
-            [0 ... size-1] = 0,
-        },
+        counts,
+        displs,
         MPI_BYTE,
         local_part,
         local_np * sizeof(t_part),
@@ -985,8 +987,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         0,
         MPI_COMM_WORLD
     );
-    // Ajustar offsets para divisão não uniforme
-    // Alternativamente, pode-se usar um loop para calcular offsets e counts
 
                 
     double energy = 0;
@@ -1112,16 +1112,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         local_np * sizeof(t_part),
         MPI_BYTE,
         spec->part,
-        (int[]){
-            [0 ... size-1] = base_np,
-        },
-        (int[]){
-            [0 ... size-1] = 0,
-        },
+        counts,
+        displs,
         MPI_BYTE,
         0,
         MPI_COMM_WORLD
     );
+    free(counts);
+    free(displs);
 
     free(local_J_buf);
     free(local_part);
