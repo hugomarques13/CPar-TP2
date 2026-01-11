@@ -15,6 +15,8 @@
 #include "simulation.h"
 #include "timer.h"
 
+#include <mpi.h>
+
 /**
  * @brief Checks if there should be a report at this timestep
  * 
@@ -180,9 +182,7 @@ void sim_report_energy( t_simulation* sim )
 {
 	int i;
 	int rank = 0;
-#ifdef _OPENMP
-	#include <mpi.h>
-#endif
+
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	if (rank == 0) {
 		double emf_energy[6];
@@ -204,7 +204,7 @@ void sim_report_energy( t_simulation* sim )
 			tot_emf, tot_part, tot_emf+tot_part);
 	}
 }
-}
+
 
 /**
  * @brief Print report on simulation energy (fields/particles/total)
