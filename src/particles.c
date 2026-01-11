@@ -1070,9 +1070,19 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     }
 
-    // Reduce local current buffers to global current buffer
-    // Using MPI_Allreduce so all ranks have the complete current density
-    MPI_Allreduce(local_J, current->J_buf, J_size * 3, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    // Reduce local current buffers across all ranks
+    // Use a temporary buffer to store the reduced result, then ADD to global current
+    // This ensures multiple species accumulate correctly
+    float3 *reduced_J = (float3*) malloc(J_size * sizeof(float3));
+    MPI_Allreduce(local_J, reduced_J, J_size * 3, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    
+    // Add reduced current to global current buffer (preserves contributions from other species)
+    for (int j = 0; j < J_size; j++) {
+        current->J_buf[j].x += reduced_J[j].x;
+        current->J_buf[j].y += reduced_J[j].y;
+        current->J_buf[j].z += reduced_J[j].z;
+    }
+    free(reduced_J);
 
     // Reduce energy across all ranks
     MPI_Allreduce(&local_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
@@ -1082,7 +1092,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     // Synchronize particle data across all ranks
     // Each rank has updated only its assigned particles, need to share updates
-    // Using MPI_Allgatherv to collect all particle updates
     
     // Calculate displacements and counts for each rank
     int *recvcounts = (int*) malloc(size * sizeof(int));
@@ -1100,10 +1109,15 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
     MPI_Type_commit(&MPI_PARTICLE);
 
-    // Gather all particle updates - each rank sends its portion, all receive the complete array
-    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
+    // Each rank sends its updated particles, receives all updates
+    // Use a temporary buffer to avoid MPI_IN_PLACE issues
+    t_part *temp_parts = (t_part*) malloc(np_total * sizeof(t_part));
+    memcpy(temp_parts, spec->part, np_total * sizeof(t_part));
+    
+    MPI_Allgatherv(&temp_parts[start_idx], end_idx - start_idx, MPI_PARTICLE,
                    spec->part, recvcounts, displs, MPI_PARTICLE, MPI_COMM_WORLD);
-
+    
+    free(temp_parts);
     MPI_Type_free(&MPI_PARTICLE);
     free(recvcounts);
     free(displs);
