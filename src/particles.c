@@ -1140,19 +1140,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Reduce into a temporary buffer on rank 0, then copy to current->J
-    if (rank == 0) {
-        float3 *temp_J = (float3*) malloc((params.nx + 2) * sizeof(float3));
-        memset(temp_J, 0, (params.nx + 2) * sizeof(float3));
-        
-        MPI_Reduce(local_J, temp_J, (params.nx + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-        
-        // Copy result to current->J
-        memcpy(current->J, temp_J, (params.nx + 2) * sizeof(float3));
-        free(temp_J);
-    } else {
-        MPI_Reduce(local_J, NULL, (params.nx + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-    }
+    // Reduce current buffer directly (current is already zeroed by current_zero before spec_advance)
+    MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     // Gather particles back (use Gatherv to handle uneven distribution)
     int *recvcounts = NULL;
