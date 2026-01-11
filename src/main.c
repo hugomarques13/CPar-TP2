@@ -39,7 +39,11 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 //#include "input/absorbing.c"
 //#include "input/density.c"
 
-int main (int argc, const char * argv[]) {
+int main (int argc, const char ** argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 	// Initialize simulation
 	t_simulation sim;
 	sim_init( &sim );
@@ -84,6 +88,6 @@ int main (int argc, const char * argv[]) {
     
     // Cleanup data
     sim_delete( &sim );
-    
+    MPI_Finalize();
 	return 0;
 }
