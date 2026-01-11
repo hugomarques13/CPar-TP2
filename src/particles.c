@@ -1029,7 +1029,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         dep_current_zamb( spec -> part[i].ix, di,
                          spec -> part[i].x, dx,
                          qnx, qvy, qvz,
-                         current );
+                         current->J );
 
         // Store results
         spec -> part[i].x = x1;
