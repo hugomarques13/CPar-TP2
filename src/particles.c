@@ -899,7 +899,7 @@ typedef struct {
     float3 *emf_E_part;
     float3 *emf_B_part;
     float spec_q;
-    float spec_np;
+    int spec_np;
     float tem;
     float dt_dx;
     float qnx;
