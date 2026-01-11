@@ -926,7 +926,7 @@ typedef struct {
  */
 
 
-vvoid spec_advance( t_species* spec, t_emf* emf, t_current* current )
+void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     int rank, size;
     MPI_Status status;
