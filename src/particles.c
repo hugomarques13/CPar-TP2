@@ -925,6 +925,7 @@ typedef struct {
  * @param emf       EM fields
  * @param current   Current density
  */
+
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     int rank, size;
@@ -933,40 +934,61 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     uint64_t t0 = timer_ticks();
 
-    // Pre-calculate constants on all processes
-    float tem, dt_dx, qnx, spec_q, dx;
+    // ----- Broadcast simulation parameters -----
+    float tem, dt_dx, qnx, spec_q, dt, m_q;
     int nx, total_np, iter;
     
     if (rank == 0) {
-        tem = 0.5f * spec->dt / spec->m_q;
-        dt_dx = spec->dt / spec->dx;
-        qnx = spec->q * spec->dx / spec->dt;
+        dt = spec->dt;
+        m_q = spec->m_q;
+        tem = 0.5f * dt / m_q;
+        dt_dx = dt / spec->dx;
+        qnx = spec->q * spec->dx / dt;
         spec_q = spec->q;
-        dx = spec->dx;
         nx = spec->nx;
         total_np = spec->np;
         iter = spec->iter;
+        
+        // DEBUG: Print critical values
+        printf("Root: dt=%e, m_q=%e, tem=%e, qnx=%e, nx=%d, total_np=%d\n",
+               dt, m_q, tem, qnx, nx, total_np);
     }
     
-    // Broadcast individual parameters
+    // Broadcast all parameters
     MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dt, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&m_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&nx, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&total_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Calculate local particle count
+    // DEBUG: All ranks print received values
+    printf("Rank %d: tem=%e, dt_dx=%e, qnx=%e, spec_q=%e, nx=%d, total_np=%d\n",
+           rank, tem, dt_dx, qnx, spec_q, nx, total_np);
+    fflush(stdout);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    // ----- Calculate local particle distribution -----
     int base_count = total_np / size;
     int remainder = total_np % size;
     int local_np = base_count + (rank < remainder ? 1 : 0);
     
+    printf("Rank %d: base_count=%d, remainder=%d, local_np=%d\n",
+           rank, base_count, remainder, local_np);
+    fflush(stdout);
+    
     // Allocate local particle array
     t_part *local_part = (t_part*)malloc(local_np * sizeof(t_part));
+    if (!local_part) {
+        fprintf(stderr, "Rank %d: Failed to allocate local_part\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
     
-    // Scatter particles - calculate counts and displacements
+    // ----- Scatter particles -----
     int *sendcounts = NULL, *displs = NULL;
     if (rank == 0) {
         sendcounts = (int*)malloc(size * sizeof(int));
@@ -975,48 +997,102 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         int offset = 0;
         for (int i = 0; i < size; i++) {
             int count = base_count + (i < remainder ? 1 : 0);
-            sendcounts[i] = count * sizeof(t_part);  // in bytes for MPI_BYTE
-            displs[i] = offset * sizeof(t_part);     // in bytes
+            sendcounts[i] = count * sizeof(t_part);
+            displs[i] = offset * sizeof(t_part);
             offset += count;
         }
     }
     
-    // Scatter particles using MPI_BYTE (simpler than custom type)
-    MPI_Scatterv(rank == 0 ? spec->part : NULL, sendcounts, displs, 
-                 MPI_BYTE,
+    // Scatter particles
+    MPI_Scatterv(rank == 0 ? spec->part : NULL, sendcounts, displs, MPI_BYTE,
                  local_part, local_np * sizeof(t_part), MPI_BYTE,
                  0, MPI_COMM_WORLD);
     
-    // Broadcast EM fields with proper guard cells
-    // The interpolation needs cells from ix-1 to ix+2 (4 cells total)
-    // Global arrays have: 1 left guard + nx cells + 2 right guards = nx+3
-    int emf_size = nx + 3;  
-    float3 *local_E = (float3*)malloc(emf_size * sizeof(float3));
-    float3 *local_B = (float3*)malloc(emf_size * sizeof(float3));
+    // ----- DEBUG: Check first particle on each rank -----
+    if (local_np > 0) {
+        printf("Rank %d: First particle: ix=%d, x=%f, ux=%f, uy=%f, uz=%f\n",
+               rank, local_part[0].ix, local_part[0].x,
+               local_part[0].ux, local_part[0].uy, local_part[0].uz);
+    }
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    // ----- Broadcast EM fields -----
+    // Check actual size from original code
+    // In particleOld.c, E_part and B_part seem to have nx+1 cells?
+    // Let's check: interpolate_fld accesses E[ih] where ih = i or i-1
+    // So needs cells from -1 to nx (inclusive) = nx+2 cells
+    // But there's also access to i+1, so needs -1 to nx+1 = nx+3 cells
+    
+    int emf_size = nx + 3;  // nx + 1 left + 2 right
+    
+    float3 *local_E = NULL;
+    float3 *local_B = NULL;
     
     if (rank == 0) {
-        // Copy from emf struct which already has guard cells
-        memcpy(local_E, emf->E_part, emf_size * sizeof(float3));
-        memcpy(local_B, emf->B_part, emf_size * sizeof(float3));
+        // First check actual sizes
+        printf("Root: emf_size=%d, sizeof(float3)=%zu\n", emf_size, sizeof(float3));
+        printf("Root: emf->E_part[0].x=%e, emf->E_part[%d].x=%e\n",
+               0, emf_size-1, emf_size-1);
+        fflush(stdout);
     }
     
-    // Broadcast field data - 3 floats per float3
+    local_E = (float3*)malloc(emf_size * sizeof(float3));
+    local_B = (float3*)malloc(emf_size * sizeof(float3));
+    
+    if (!local_E || !local_B) {
+        fprintf(stderr, "Rank %d: Failed to allocate fields\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    
+    if (rank == 0) {
+        memcpy(local_E, emf->E_part, emf_size * sizeof(float3));
+        memcpy(local_B, emf->B_part, emf_size * sizeof(float3));
+        
+        // DEBUG: Check field values
+        printf("Root: E_part pointer: %p, copied to local_E: %p\n", 
+               emf->E_part, local_E);
+        printf("Root: First few Ex values: %e, %e, %e\n",
+               local_E[0].x, local_E[1].x, local_E[2].x);
+    }
+    
+    // Broadcast field arrays
     MPI_Bcast(local_E, emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(local_B, emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
     
-    // Allocate local current with same guard cell pattern
+    // DEBUG: Check received fields
+    printf("Rank %d: After bcast: local_E[0].x=%e, local_E[1].x=%e\n",
+           rank, local_E[0].x, local_E[1].x);
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    // ----- Allocate local current buffer -----
+    // Current array needs same size as fields for guard cells
     float3 *local_J = (float3*)calloc(emf_size, sizeof(float3));
+    if (!local_J) {
+        fprintf(stderr, "Rank %d: Failed to allocate local_J\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
     
+    // ----- Advance local particles -----
     double local_energy = 0.0;
+    int local_particles_pushed = 0;
     
-    // Advance local particles
     for (int i = 0; i < local_np; i++) {
+        local_particles_pushed++;
+        
         float3 Ep, Bp;
         
-        // Interpolate fields using local copies
+        // Interpolate fields
         interpolate_fld(local_E, local_B, &local_part[i], &Ep, &Bp);
         
-        // ----- Boris pusher (identical to serial version) -----
+        // DEBUG: Check first particle's fields
+        if (i == 0 && local_np > 0) {
+            printf("Rank %d: Particle 0 fields: Ep=(%e,%e,%e), Bp=(%e,%e,%e)\n",
+                   rank, Ep.x, Ep.y, Ep.z, Bp.x, Bp.y, Bp.z);
+        }
+        
+        // Boris pusher
         Ep.x *= tem;
         Ep.y *= tem;
         Ep.z *= tem;
@@ -1028,7 +1104,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float u2 = utx*utx + uty*uty + utz*utz;
         float gamma = sqrtf(1.0f + u2);
         
-        // Accumulate time-centered energy (gamma - 1)
+        // Accumulate kinetic energy: (γ - 1) * m c²
+        // But we'll multiply by m_q later
         local_energy += (gamma - 1.0f);
         
         float gtem = tem / gamma;
@@ -1054,48 +1131,76 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uy = uty + Ep.y;
         uz = utz + Ep.z;
         
+        // Store new velocities
         local_part[i].ux = ux;
         local_part[i].uy = uy;
         local_part[i].uz = uz;
         
-        // ----- Push particle -----
+        // Push particle
         float rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
         float particle_dx = dt_dx * rg * ux;
         float x1 = local_part[i].x + particle_dx;
         int di = ltrim(x1);
         x1 -= di;
         
-        // Update particle position
+        // Update particle
         local_part[i].x = x1;
         local_part[i].ix += di;
         
-        // ----- Apply periodic boundaries locally -----
-        // This is CRITICAL for correct current deposition
-        while (local_part[i].ix < 0) local_part[i].ix += nx;
-        while (local_part[i].ix >= nx) local_part[i].ix -= nx;
+        // Apply periodic boundaries (CRITICAL!)
+        // Particle should stay within [0, nx-1]
+        if (local_part[i].ix < 0) {
+            local_part[i].ix += nx;
+        } else if (local_part[i].ix >= nx) {
+            local_part[i].ix -= nx;
+        }
         
-        // ----- Deposit current -----
+        // DEBUG: Check if particle moved too far
+        if (abs(di) > 1) {
+            printf("Rank %d: WARNING: particle %d moved %d cells!\n", 
+                   rank, i, di);
+        }
+        
+        // Deposit current
         float qvy = spec_q * uy * rg;
         float qvz = spec_q * uz * rg;
         
-        // IMPORTANT: current->J points to cell 1 (skips left guard cell)
-        // So we need local_J + 1 to match
-        dep_current_zamb(local_part[i].ix, di,
-                        local_part[i].x,  // Use current x (after boundary adjust)
-                        particle_dx,
-                        qnx, qvy, qvz,
-                        local_J + 1);  // +1 to skip left guard cell
+        // IMPORTANT: Check if ix is within valid range for deposition
+        int dep_ix = local_part[i].ix;
+        if (dep_ix < 0 || dep_ix >= nx) {
+            printf("Rank %d: ERROR: Particle %d has invalid ix=%d for deposition\n",
+                   rank, i, dep_ix);
+        } else {
+            // Deposit current - note offset by 1 for left guard cell
+            dep_current_zamb(dep_ix, di,
+                            local_part[i].x,
+                            particle_dx,
+                            qnx, qvy, qvz,
+                            local_J + 1);  // +1 to skip left guard
+        }
     }
     
-    // Reduce energy from all processes
+    printf("Rank %d: Pushed %d particles, local_energy=%e\n",
+           rank, local_particles_pushed, local_energy);
+    fflush(stdout);
+    
+    // ----- Reduce results -----
     double total_energy;
     MPI_Reduce(&local_energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Reduce current from all processes
-    // Note: current->J_buf is the full buffer including guard cells
+    // Reduce current - check current array size
+    if (rank == 0) {
+        printf("Root: Before reduce: current->J_buf[0].x=%e\n", current->J_buf[0].x);
+    }
+    
     MPI_Reduce(local_J, current->J_buf, emf_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Gather particles back to root
+    if (rank == 0) {
+        printf("Root: After reduce: current->J_buf[0].x=%e\n", current->J_buf[0].x);
+        printf("Root: total_energy reduced=%e\n", total_energy);
+    }
+    
+    // ----- Gather particles back -----
     int *recvcounts = NULL, *recvdispls = NULL;
     if (rank == 0) {
         recvcounts = (int*)malloc(size * sizeof(int));
@@ -1104,8 +1209,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         int offset = 0;
         for (int i = 0; i < size; i++) {
             int count = base_count + (i < remainder ? 1 : 0);
-            recvcounts[i] = count * sizeof(t_part);  // in bytes
-            recvdispls[i] = offset * sizeof(t_part); // in bytes
+            recvcounts[i] = count * sizeof(t_part);
+            recvdispls[i] = offset * sizeof(t_part);
             offset += count;
         }
     }
@@ -1114,7 +1219,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
                 rank == 0 ? spec->part : NULL, recvcounts, recvdispls, MPI_BYTE,
                 0, MPI_COMM_WORLD);
     
-    // Cleanup local memory
+    // ----- Cleanup and finalize -----
     free(local_part);
     free(local_E);
     free(local_B);
@@ -1126,11 +1231,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         free(recvcounts);
         free(recvdispls);
         
-        // Update species state (only on root)
-        spec->energy = spec_q * spec->m_q * total_energy * dx;
+        // Update species state
+        spec->energy = spec_q * m_q * total_energy * dx;  // kinetic energy
         spec->iter = iter + 1;
         
-        // Apply boundary conditions (only on root, for consistency check)
+        printf("Root: spec->energy = %e * %e * %e * %e = %e\n",
+               spec_q, m_q, total_energy, dx, spec->energy);
+        
+        // Apply boundary conditions (should already be done locally, but double-check)
         if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
             if (spec->moving_window) {
                 spec_move_window(spec);
@@ -1145,7 +1253,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
                 i++;
             }
         } else {
-            // Double-check periodic boundaries
+            // Periodic boundaries - ensure all particles are within bounds
             for (int i = 0; i < spec->np; i++) {
                 while (spec->part[i].ix < 0) spec->part[i].ix += nx;
                 while (spec->part[i].ix >= nx) spec->part[i].ix -= nx;
@@ -1157,12 +1265,13 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
             spec_sort(spec);
         }
         
-        // Update timing (only on root)
+        // Update timing
         _spec_npush += spec->np;
         _spec_time += timer_interval_seconds(t0, timer_ticks());
+        
+        printf("Root: Final update done\n");
     }
     
-    // Synchronize all processes
     MPI_Barrier(MPI_COMM_WORLD);
 }
 /*********************************************************************************************
