@@ -939,30 +939,29 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     uint64_t t0;
     t0 = timer_ticks();
 
-    const float tem   = 0.5 * spec->dt/spec -> m_q;
-    const float dt_dx = spec->dt / spec->dx;
-
-    // Auxiliary values for current deposition
-    const float qnx = spec -> q *  spec->dx / spec->dt;
-
-    const int nx0 = spec -> nx;
-
-    // MPI parallel version (size > 1)
-    // Calculate EMF array size (includes guard cells)
-    int emf_size = emf->gc[0] + emf->nx + emf->gc[1];
-
-    // Turn it into a struct for Broadcast (no pointers!)
-    t_particle_params params = {
-        .spec_q     = spec -> q,
-        .spec_np    = spec -> np,
-        .tem        = tem,
-        .dt_dx      = dt_dx,
-        .qnx        = qnx,
-        .nx         = spec -> nx,
-        .emf_size   = emf_size
-    };
+    // Prepare parameters on rank 0, then broadcast
+    t_particle_params params;
+    
+    if (rank == 0) {
+        const float tem   = 0.5 * spec->dt/spec -> m_q;
+        const float dt_dx = spec->dt / spec->dx;
+        const float qnx = spec -> q *  spec->dx / spec->dt;
+        int emf_size = emf->gc[0] + emf->nx + emf->gc[1];
+        
+        params = (t_particle_params) {
+            .spec_q     = spec -> q,
+            .spec_np    = spec -> np,
+            .tem        = tem,
+            .dt_dx      = dt_dx,
+            .qnx        = qnx,
+            .nx         = spec -> nx,
+            .emf_size   = emf_size
+        };
+    }
 
     MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
+    
+    const int nx0 = params.nx;
 
     // Allocate and broadcast EMF field data
     float3 *local_E_buf = (float3*) malloc(params.emf_size * sizeof(float3));
@@ -1011,7 +1010,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Store part in a local variable to avoid sending all of spec
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
 
-    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
+    MPI_Scatterv((rank == 0) ? spec->part : NULL, sendcounts, displs, MPI_BYTE,
                  local_part, local_np * sizeof(t_part), MPI_BYTE,
                  0, MPI_COMM_WORLD);
     
@@ -1140,21 +1139,9 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Debug: print some current values before reduce
-    if (rank == 0) {
-        printf("[Rank %d] Before reduce - local_J[0] = (%f, %f, %f)\n", rank, local_J[0].x, local_J[0].y, local_J[0].z);
-        printf("[Rank %d] Before reduce - local_J[nx/2] = (%f, %f, %f)\n", rank, local_J[params.nx/2].x, local_J[params.nx/2].y, local_J[params.nx/2].z);
-    }
-    if (rank == 1 && size > 1) {
-        printf("[Rank %d] Before reduce - local_J[0] = (%f, %f, %f)\n", rank, local_J[0].x, local_J[0].y, local_J[0].z);
-        printf("[Rank %d] Before reduce - local_J[nx/2] = (%f, %f, %f)\n", rank, local_J[params.nx/2].x, local_J[params.nx/2].y, local_J[params.nx/2].z);
-    }
-
     // Reduce current buffer directly (current is already zeroed by current_zero before spec_advance)
     if (rank == 0) {
         MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-        printf("[Rank %d] After reduce - current->J[0] = (%f, %f, %f)\n", rank, current->J[0].x, current->J[0].y, current->J[0].z);
-        printf("[Rank %d] After reduce - current->J[nx/2] = (%f, %f, %f)\n", rank, current->J[params.nx/2].x, current->J[params.nx/2].y, current->J[params.nx/2].z);
     } else {
         MPI_Reduce(local_J_buf, NULL, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     }
@@ -1179,7 +1166,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     }
 
     MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
-                spec->part, recvcounts, recvdispls, MPI_BYTE,
+                (rank == 0) ? spec->part : NULL, recvcounts, recvdispls, MPI_BYTE,
                 0, MPI_COMM_WORLD);
     
     if (rank == 0) {
