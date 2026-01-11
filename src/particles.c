@@ -1074,15 +1074,15 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     }
 
-    print("Rank %d deposited energy: %f \n", rank, energy);
+    printf("Rank %d deposited energy: %f \n", rank, energy);
 
     double total_energy = (double) 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    print("rank deposied local_J_buf \n", local_J_buf[0].x);
+    printf("rank deposied local_J_buf \n", local_J_buf[0].x);
 
     if (rank==0)
-        print("J is before reduce: %f \n", current->J[0].x);
+        printf("J is before reduce: %f \n", current->J[0].x);
 
     MPI_Reduce(local_J_buf, current->J, (1 + nx0 + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
@@ -1094,7 +1094,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     free(local_part);
 
     if (rank==0)
-        print("J is after reduce: %f \n", current->J[0].x);
+        printf("J is after reduce: %f \n", current->J[0].x);
 
     if (rank != 0) return;
 
