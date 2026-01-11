@@ -1092,35 +1092,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     // Synchronize particle data across all ranks
     // Each rank has updated only its assigned particles, need to share updates
+    // We use MPI_Bcast from each rank for its portion (simpler and more reliable)
     
-    // Calculate displacements and counts for each rank
-    int *recvcounts = (int*) malloc(size * sizeof(int));
-    int *displs = (int*) malloc(size * sizeof(int));
-    
-    for (int r = 0; r < size; r++) {
-        int r_particles = particles_per_rank + (r < remainder ? 1 : 0);
-        int r_start = r * particles_per_rank + (r < remainder ? r : remainder);
-        recvcounts[r] = r_particles;
-        displs[r] = r_start;
-    }
-
     // Create MPI datatype for t_part structure
     MPI_Datatype MPI_PARTICLE;
     MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
     MPI_Type_commit(&MPI_PARTICLE);
 
-    // Each rank sends its updated particles, receives all updates
-    // Use a temporary buffer to avoid MPI_IN_PLACE issues
-    t_part *temp_parts = (t_part*) malloc(np_total * sizeof(t_part));
-    memcpy(temp_parts, spec->part, np_total * sizeof(t_part));
+    // Each rank broadcasts its updated particles to all other ranks
+    for (int r = 0; r < size; r++) {
+        int r_particles = particles_per_rank + (r < remainder ? 1 : 0);
+        int r_start = r * particles_per_rank + (r < remainder ? r : remainder);
+        
+        // Rank r broadcasts its portion to all ranks
+        MPI_Bcast(&spec->part[r_start], r_particles, MPI_PARTICLE, r, MPI_COMM_WORLD);
+    }
     
-    MPI_Allgatherv(&temp_parts[start_idx], end_idx - start_idx, MPI_PARTICLE,
-                   spec->part, recvcounts, displs, MPI_PARTICLE, MPI_COMM_WORLD);
-    
-    free(temp_parts);
     MPI_Type_free(&MPI_PARTICLE);
-    free(recvcounts);
-    free(displs);
 
     // Store energy
     spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
