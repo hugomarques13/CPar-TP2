@@ -15,8 +15,6 @@
 #include "simulation.h"
 #include "timer.h"
 
-#include <mpi.h>
-
 /**
  * @brief Checks if there should be a report at this timestep
  * 
