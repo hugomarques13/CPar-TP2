@@ -917,86 +917,56 @@ int ltrim( float x )
 
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
-    int rank, size;
+    int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    uint64_t t0 = timer_ticks();
+    uint64_t t0;
+    t0 = timer_ticks();
 
-    // Broadcast needed parameters
+    // Broadcast essential simulation parameters
+    int spec_np = spec->np;
+    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    // Broadcast particle data from rank 0 to all ranks
+    if (spec_np > 0) {
+        MPI_Bcast(spec->part, spec_np * sizeof(t_part), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+    
+    // Broadcast EM fields
+    MPI_Bcast(emf->E_part, (spec->nx + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf->B_part, (spec->nx + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    
+    // Broadcast current data (with guard cells)
+    int current_size = 1 + spec->nx + 2;  // Include guard cells
+    MPI_Bcast(current->J, current_size * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+
     const float tem   = 0.5 * spec->dt/spec -> m_q;
     const float dt_dx = spec->dt / spec->dx;
     const float qnx = spec -> q *  spec->dx / spec->dt;
     const int nx0 = spec -> nx;
-    float spec_q = spec -> q;
-    int spec_np = spec -> np;
-
-    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // Allocate field arrays on ALL processes
-    float3 *emf_E_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
-    float3 *emf_B_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
-    
-    if (rank == 0) {
-        // Copy from root's emf structure
-        memcpy(emf_E_part, emf->E_part, (nx0 + 1) * sizeof(float3));
-        memcpy(emf_B_part, emf->B_part, (nx0 + 1) * sizeof(float3));
-    }
-    
-    // Broadcast field data
-    MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    // Calculate particle distribution
-    int local_np = spec_np / size;
-    int extra = spec_np % size;
-    if (rank < extra) local_np++;
-    
-    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-    
-    // Simple scatter
-    int send_size = local_np * sizeof(t_part);
-    MPI_Scatter(spec->part, send_size, MPI_BYTE,
-                local_part, send_size, MPI_BYTE,
-                0, MPI_COMM_WORLD);
 
     double energy = 0;
-    
-    // Allocate local J array - need enough space for dep_current_zamb
-    // dep_current_zamb accesses J[ix] and J[ix+1] where ix ∈ [0, nx0-1]
-    // So we need indices 0 through nx0
-    int J_size = nx0 + 2;  // nx0+1 cells + 1 extra for safety
-    float3 *local_J = (float3*) calloc(J_size, sizeof(float3));
-    
-    // Clear global current on root (others don't have current->J)
-    if (rank == 0) {
-        // Find out actual J allocation size from your code
-        // Usually: current->J = malloc((nx + 2) * sizeof(float3));
-        memset(current->J, 0, J_size * sizeof(float3));
-    }
 
-    // Advance particles
-    for (int i = 0; i < local_np; i++) {
+    // All processes advance particles
+    for (int i=0; i<spec_np; i++) {
+
         float3 Ep, Bp;
         float utx, uty, utz;
         float ux, uy, uz, u2;
         float gamma, rg, gtem, otsq;
+
         float x1;
+
         int di;
         float dx;
 
         // Load particle momenta
-        ux = local_part[i].ux;
-        uy = local_part[i].uy;
-        uz = local_part[i].uz;
+        ux = spec -> part[i].ux;
+        uy = spec -> part[i].uy;
+        uz = spec -> part[i].uz;
 
-        // interpolate fields - use local arrays
-        interpolate_fld(emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp);
+        // interpolate fields
+        interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
 
         // advance u using Boris scheme
         Ep.x *= tem;
@@ -1009,17 +979,18 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
         // Perform first half of the rotation
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf(1 + u2);
+        gamma = sqrtf( 1 + u2 );
 
         // Accumulate time centered energy
-        energy += u2 / (1 + gamma);
+        energy += u2 / ( 1 + gamma );
 
         gtem = tem / gamma;
+
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
 
-        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
+        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
 
         ux = utx + uty*Bp.z - utz*Bp.y;
         uy = uty + utz*Bp.x - utx*Bp.z;
@@ -1040,88 +1011,97 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        local_part[i].ux = ux;
-        local_part[i].uy = uy;
-        local_part[i].uz = uz;
+        spec -> part[i].ux = ux;
+        spec -> part[i].uy = uy;
+        spec -> part[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
         dx = dt_dx * rg * ux;
-        x1 = local_part[i].x + dx;
+        x1 = spec -> part[i].x + dx;
         di = ltrim(x1);
         x1 -= di;
 
-        float qvy = spec_q * uy * rg;
-        float qvz = spec_q * uz * rg;
+        float qvy = spec->q * uy * rg;
+        float qvz = spec->q * uz * rg;
 
-        // deposit current - use local_J
-        dep_current_zamb(local_part[i].ix, di,
-                        local_part[i].x, dx,
-                        qnx, qvy, qvz,
-                        local_J);
+        // deposit current using zamb method
+        dep_current_zamb( spec -> part[i].ix, di,
+                         spec -> part[i].x, dx,
+                         qnx, qvy, qvz,
+                         current );
 
         // Store results
-        local_part[i].x = x1;
-        local_part[i].ix += di;
+        spec -> part[i].x = x1;
+        spec -> part[i].ix += di;
     }
 
-    // Reduce results to root
-    double total_energy = 0.0;
+    // Reduce energy from all processes
+    double total_energy = 0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    // Reduce current deposition from all processes
+    float3* total_J = malloc(current_size * sizeof(float3));
+    memset(total_J, 0, current_size * sizeof(float3));
+    MPI_Reduce(current->J, total_J, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Reduce current deposition - all ranks contribute local_J to root's current->J
-    MPI_Reduce(local_J, current->J, J_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-    
-    // Gather particles back
-    MPI_Gather(local_part, send_size, MPI_BYTE,
-               spec->part, send_size, MPI_BYTE,
-               0, MPI_COMM_WORLD);
+    // Rank 0 updates final values
+    if (rank == 0) {
+        // Copy reduced current back
+        memcpy(current->J, total_J, current_size * sizeof(float3));
+        
+        // Store energy
+        spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
 
-    // Cleanup
-    free(local_J);
-    free(local_part);
-    free(emf_E_part);
-    free(emf_B_part);
+        // Advance internal iteration number
+        spec -> iter += 1;
 
-    if (rank != 0) return;
+        // Check for particles leaving the box
+        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+            // Move simulation window if needed
+            if (spec -> moving_window ) spec_move_window( spec );
 
-    // Store energy
-    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
-
-    // Advance internal iteration number
-    spec -> iter += 1;
-
-    // Check for particles leaving the box
-    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
-        // Move simulation window if needed
-        if (spec -> moving_window )	spec_move_window( spec );
-
-        // Use absorbing boundaries along x
-        int i = 0;
-        while ( i < spec -> np ) {
-            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                spec -> part[i] = spec -> part[ -- spec -> np ];
-                continue;
+            // Use absorbing boundaries along x
+            int i = 0;
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
+                    continue;
+                }
+                i++;
             }
-            i++;
+        } else {
+            // Use periodic boundaries in x
+            for (int i=0; i<spec->np; i++) {
+                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+            }
         }
-    } else {
-        // Use periodic boundaries in x
-        for (int i=0; i<spec->np; i++) {
-            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+
+        // Sort species at every n_sort time steps
+        if ( spec -> n_sort > 0 ) {
+            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
         }
-    }
 
-    // Sort species at every n_sort time steps
-    if ( spec -> n_sort > 0 ) {
-        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+        // Timing info
+        _spec_npush += spec -> np;
+        _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
-
-    // Timing info
-    _spec_npush += spec -> np;
-    _spec_time += timer_interval_seconds( t0, timer_ticks() );
+    
+    free(total_J);
+    
+    // Broadcast updated particle data back to all ranks for next iteration
+    if (rank == 0) {
+        spec_np = spec->np;
+    }
+    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    if (spec_np > 0) {
+        MPI_Bcast(spec->part, spec_np * sizeof(t_part), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+    
+    // Also broadcast the updated current
+    MPI_Bcast(current->J, current_size * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
-
 
 /*********************************************************************************************
 
