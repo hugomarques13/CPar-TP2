@@ -944,6 +944,148 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const int nx0 = spec -> nx;
 
+    // If running serial (size == 1), use original algorithm
+    if (size == 1) {
+        double energy = 0;
+
+        // Advance particles
+        for (int i=0; i<spec->np; i++) {
+
+            float3 Ep, Bp;
+            float utx, uty, utz;
+            float ux, uy, uz, u2;
+            float gamma, rg, gtem, otsq;
+
+            float x1;
+
+            int di;
+            float dx;
+
+            // Load particle momenta
+            ux = spec -> part[i].ux;
+            uy = spec -> part[i].uy;
+            uz = spec -> part[i].uz;
+
+            // interpolate fields
+            interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
+
+            // advance u using Boris scheme
+            Ep.x *= tem;
+            Ep.y *= tem;
+            Ep.z *= tem;
+
+            utx = ux + Ep.x;
+            uty = uy + Ep.y;
+            utz = uz + Ep.z;
+
+            // Perform first half of the rotation
+            // Get time centered gamma
+            u2 = utx*utx + uty*uty + utz*utz;
+            gamma = sqrtf( 1 + u2 );
+
+            // Accumulate time centered energy
+            energy += u2 / ( 1 + gamma );
+
+            gtem = tem / gamma;
+
+            Bp.x *= gtem;
+            Bp.y *= gtem;
+            Bp.z *= gtem;
+
+            otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
+
+            ux = utx + uty*Bp.z - utz*Bp.y;
+            uy = uty + utz*Bp.x - utx*Bp.z;
+            uz = utz + utx*Bp.y - uty*Bp.x;
+
+            // Perform second half of the rotation
+
+            Bp.x *= otsq;
+            Bp.y *= otsq;
+            Bp.z *= otsq;
+
+            utx += uy*Bp.z - uz*Bp.y;
+            uty += uz*Bp.x - ux*Bp.z;
+            utz += ux*Bp.y - uy*Bp.x;
+
+            // Perform second half of electric field acceleration
+            ux = utx + Ep.x;
+            uy = uty + Ep.y;
+            uz = utz + Ep.z;
+
+            // Store new momenta
+            spec -> part[i].ux = ux;
+            spec -> part[i].uy = uy;
+            spec -> part[i].uz = uz;
+
+            // push particle
+            rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
+
+            dx = dt_dx * rg * ux;
+
+            x1 = spec -> part[i].x + dx;
+
+            di = ltrim(x1);
+
+            x1 -= di;
+
+            float qvy = spec->q * uy * rg;
+            float qvz = spec->q * uz * rg;
+
+            // deposit current using original method
+            dep_current_zamb( spec -> part[i].ix, di,
+                             spec -> part[i].x, dx,
+                             qnx, qvy, qvz,
+                             current->J );
+
+            // Store results
+            spec -> part[i].x = x1;
+            spec -> part[i].ix += di;
+
+        }
+
+        // Store energy
+        spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
+
+        // Advance internal iteration number
+        spec -> iter += 1;
+
+        // Check for particles leaving the box
+        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+
+            // Move simulation window if needed
+            if (spec -> moving_window )	spec_move_window( spec );
+
+            // Use absorbing boundaries along x
+            int i = 0;
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
+                    continue;
+                }
+                i++;
+            }
+
+        } else {
+            // Use periodic boundaries in x
+            for (int i=0; i<spec->np; i++) {
+                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+            }
+        }
+
+        // Sort species at every n_sort time steps
+        if ( spec -> n_sort > 0 ) {
+            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+        }
+
+        // Timing info
+        _spec_npush += spec -> np;
+        _spec_time += timer_interval_seconds( t0, timer_ticks() );
+        
+        return;
+    }
+
+    // MPI parallel version (size > 1)
     // Calculate EMF array size (includes guard cells)
     int emf_size = emf->gc[0] + emf->nx + emf->gc[1];
 
