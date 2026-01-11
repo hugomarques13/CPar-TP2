@@ -920,8 +920,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     int rank, size;
     MPI_Status status;
 
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     uint64_t t0;
     t0 = timer_ticks();
@@ -940,48 +940,67 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     float spec_q = spec -> q;
     int spec_np = spec -> np;
 
+    // Broadcast simulation parameters
     MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
     MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
     MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
     MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-
-    int local_np = spec_np / size;
-
-    // Store part in a local variable to avoid sending all of spec
-    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-
-    MPI_Scatter(spec->part, local_np * sizeof(t_part), MPI_BYTE,
-                local_part, local_np * sizeof(t_part), MPI_BYTE,
-                0, MPI_COMM_WORLD);
-
-                
+    // Calculate particle distribution
+    int base_count = spec_np / size;
+    int remainder = spec_np % size;
+    
+    int *sendcounts = NULL;
+    int *displs = NULL;
+    t_part *local_part = NULL;
+    int local_np;
+    
+    if (rank == 0) {
+        sendcounts = (int*) malloc(size * sizeof(int));
+        displs = (int*) malloc(size * sizeof(int));
+        
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            sendcounts[i] = (i < remainder) ? (base_count + 1) : base_count;
+            sendcounts[i] *= sizeof(t_part);
+            displs[i] = offset;
+            offset += sendcounts[i];
+        }
+    }
+    
+    // Get local particle count
+    local_np = (rank < remainder) ? (base_count + 1) : base_count;
+    local_part = (t_part*) malloc(local_np * sizeof(t_part));
+    
+    // Scatter particles with variable counts
+    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
+                 local_part, local_np * sizeof(t_part), MPI_BYTE,
+                 0, MPI_COMM_WORLD);
+    
+    if (rank == 0) {
+        free(sendcounts);
+        free(displs);
+    }
+    
     double energy = 0;
     
-    // Allocate local current buffer with guard cells (gc[0]=1, gc[1]=2)
+    // Allocate local current buffer with guard cells
     int current_size = 1 + nx0 + 2;
     float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
     memset(local_J_buf, 0, current_size * sizeof(float3));
-    // Offset pointer like current->J does
     float3 *local_J = local_J_buf + 1;
 
     // Advance particles
-    for (int i=0; i<local_np; i++) {
-
+    for (int i = 0; i < local_np; i++) {
         float3 Ep, Bp;
         float utx, uty, utz;
         float ux, uy, uz, u2;
         float gamma, rg, gtem, otsq;
-
         float x1;
-
         int di;
         float dx;
 
@@ -990,11 +1009,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uy = local_part[i].uy;
         uz = local_part[i].uz;
 
-        // interpolate fields
-        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
-        // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
+        // Interpolate fields
+        interpolate_fld(emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp);
 
-        // advance u using Boris scheme
+        // Advance u using Boris scheme
         Ep.x *= tem;
         Ep.y *= tem;
         Ep.z *= tem;
@@ -1004,27 +1022,24 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         utz = uz + Ep.z;
 
         // Perform first half of the rotation
-        // Get time centered gamma
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf( 1 + u2 );
+        gamma = sqrtf(1 + u2);
 
         // Accumulate time centered energy
-        energy += u2 / ( 1 + gamma );
+        energy += u2 / (1 + gamma);
 
         gtem = tem / gamma;
-
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
 
-        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
+        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
 
         ux = utx + uty*Bp.z - utz*Bp.y;
         uy = uty + utz*Bp.x - utx*Bp.z;
         uz = utz + utx*Bp.y - uty*Bp.x;
 
         // Perform second half of the rotation
-
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
@@ -1043,100 +1058,108 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         local_part[i].uy = uy;
         local_part[i].uz = uz;
 
-        // push particle
+        // Push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
-
         dx = dt_dx * rg * ux;
-
         x1 = local_part[i].x + dx;
-
         di = ltrim(x1);
-
         x1 -= di;
 
         float qvy = spec_q * uy * rg;
         float qvz = spec_q * uz * rg;
 
-        // deposit current using Eskirepov method
-        // dep_current_esk( spec -> part[i].ix, di,
-        // 				 spec -> part[i].x, x1,
-        // 				 qnx, qvy, qvz,
-        // 				 current );
-
-        dep_current_zamb( local_part[i].ix, di,
-                         local_part[i].x, dx,
-                         qnx, qvy, qvz,
-                         local_J );
+        // Deposit current using Zamb method
+        dep_current_zamb(local_part[i].ix, di,
+                        local_part[i].x, dx,
+                        qnx, qvy, qvz,
+                        local_J);
 
         // Store results
         local_part[i].x = x1;
         local_part[i].ix += di;
-
     }
 
-    printf("Rank %d deposited energy: %f \n", rank, energy);
-
-    double total_energy = (double) 0.0;
+    // After particle advance, some particles might have left the domain
+    // Count valid particles
+    int valid_local_np = 0;
+    for (int i = 0; i < local_np; i++) {
+        if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
+            if (local_part[i].ix >= 0 && local_part[i].ix < nx0) {
+                if (valid_local_np != i) {
+                    local_part[valid_local_np] = local_part[i];
+                }
+                valid_local_np++;
+            }
+        } else {
+            // For periodic boundaries, adjust indices
+            local_part[i].ix += ((local_part[i].ix < 0) ? nx0 : 0) - ((local_part[i].ix >= nx0) ? nx0 : 0);
+            valid_local_np = local_np;
+        }
+    }
+    
+    // Reduce energy
+    double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-
-    printf("rank deposied local_J_buf \n", local_J_buf[0].x);
-
-    if (rank==0)
-        printf("J is before reduce: %f \n", current->J[0].x);
-
-    MPI_Reduce(local_J_buf, current->J, (1 + nx0 + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-
-    MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
-            spec->part, local_np * sizeof(t_part), MPI_BYTE,
-            0, MPI_COMM_WORLD);
-
+    
+    // Reduce current deposition
+    MPI_Reduce(local_J_buf, current->J, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Gather particle counts from all processes
+    int *recvcounts = NULL;
+    int *rdispls = NULL;
+    
+    if (rank == 0) {
+        recvcounts = (int*) malloc(size * sizeof(int));
+        rdispls = (int*) malloc(size * sizeof(int));
+    }
+    
+    MPI_Gather(&valid_local_np, 1, MPI_INT, recvcounts, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    // Calculate displacements and total particles
+    int total_np = 0;
+    if (rank == 0) {
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            rdispls[i] = offset;
+            offset += recvcounts[i];
+            total_np += recvcounts[i];
+            recvcounts[i] *= sizeof(t_part);
+            rdispls[i] *= sizeof(t_part);
+        }
+    }
+    
+    // Gather particles with variable counts
+    MPI_Gatherv(local_part, valid_local_np * sizeof(t_part), MPI_BYTE,
+                spec->part, recvcounts, rdispls, MPI_BYTE,
+                0, MPI_COMM_WORLD);
+    
+    // Cleanup
     free(local_J_buf);
     free(local_part);
-
-    if (rank==0)
-        printf("J is after reduce: %f \n", current->J[0].x);
-
-    if (rank != 0) return;
-
-    // Store energy
-    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
-
-    // Advance internal iteration number
-    spec -> iter += 1;
-
-    // Check for particles leaving the box
-    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
-
-        // Move simulation window if needed
-        if (spec -> moving_window )	spec_move_window( spec );
-
-        // Use absorbing boundaries along x
-        int i = 0;
-        while ( i < spec -> np ) {
-            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                spec -> part[i] = spec -> part[ -- spec -> np ];
-                continue;
-            }
-            i++;
-        }
-
-    } else {
-        // Use periodic boundaries in x
-        for (int i=0; i<spec->np; i++) {
-            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
-        }
-    }
-
-    // Sort species at every n_sort time steps
-    if ( spec -> n_sort > 0 ) {
-        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
-    }
-
-    // Timing info
-    _spec_npush += spec -> np;
-    _spec_time += timer_interval_seconds( t0, timer_ticks() );
     
+    if (rank == 0) {
+        spec->np = total_np;
+        spec->energy = spec->q * spec->m_q * total_energy * spec->dx;
+        spec->iter += 1;
+        
+        // Apply moving window if needed
+        if (spec->moving_window) {
+            spec_move_window(spec);
+        }
+        
+        // Sort species at every n_sort time steps
+        if (spec->n_sort > 0 && !(spec->iter % spec->n_sort)) {
+            spec_sort(spec);
+        }
+        
+        free(recvcounts);
+        free(rdispls);
+    }
+    
+    _spec_npush += spec_np; // Use original total for timing statistics
+    _spec_time += timer_interval_seconds(t0, timer_ticks());
 }
+
 /*********************************************************************************************
 
  Charge Deposition
