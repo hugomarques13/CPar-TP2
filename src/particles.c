@@ -942,8 +942,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     float3 *emf_E_part = emf -> E_part;
     float3 *emf_B_part = emf -> B_part;
 
-    MPI_Bcast(emf_E_part, (nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, (nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_E_part, (nx0 + 1) * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_B_part, (nx0 + 1) * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     // Calculate how many particles each rank gets
     int local_np = spec_np / size;
