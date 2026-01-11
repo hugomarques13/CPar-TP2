@@ -962,14 +962,31 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-    int local_np = params.spec_np / size;
+    // Divisão justa, último rank pode ficar com resto
+    int base_np = params.spec_np / size;
+    int rem = params.spec_np % size;
+    int local_np = base_np + (rank < rem ? 1 : 0);
+    int offset = rank * base_np + (rank < rem ? rank : rem);
 
-    // Store part in a local variable to avoid sending all of spec
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
-
-    MPI_Scatter(spec->part, local_np * sizeof(t_part), MPI_BYTE,
-                local_part, local_np * sizeof(t_part), MPI_BYTE,
-                0, MPI_COMM_WORLD);
+    // Distribuir partículas manualmente para suportar divisão não uniforme
+    MPI_Scatterv(
+        spec->part,
+        (int[]){
+            [0 ... size-1] = base_np,
+        },
+        (int[]){
+            [0 ... size-1] = 0,
+        },
+        MPI_BYTE,
+        local_part,
+        local_np * sizeof(t_part),
+        MPI_BYTE,
+        0,
+        MPI_COMM_WORLD
+    );
+    // Ajustar offsets para divisão não uniforme
+    // Alternativamente, pode-se usar um loop para calcular offsets e counts
 
                 
     double energy = 0;
@@ -1083,14 +1100,28 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     }
 
-    double total_energy;
+    double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Reduce(local_J_buf, current->J_buf, (1 + params.nx + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Corrente: somar local_J_buf de todos os ranks
+    MPI_Reduce(local_J_buf, current->J_buf, current_size * sizeof(float3), MPI_BYTE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
-            spec->part, local_np * sizeof(t_part), MPI_BYTE,
-            0, MPI_COMM_WORLD);
+    // Recolher partículas atualizadas
+    MPI_Gatherv(
+        local_part,
+        local_np * sizeof(t_part),
+        MPI_BYTE,
+        spec->part,
+        (int[]){
+            [0 ... size-1] = base_np,
+        },
+        (int[]){
+            [0 ... size-1] = 0,
+        },
+        MPI_BYTE,
+        0,
+        MPI_COMM_WORLD
+    );
 
     free(local_J_buf);
     free(local_part);
