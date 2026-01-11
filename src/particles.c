@@ -925,19 +925,25 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     uint64_t t0;
     t0 = timer_ticks();
 
-    // Broadcast parameters from rank 0 to all ranks
-    int spec_np = spec->np;
+    // Rank 0 computes and broadcasts parameters
+    float tem, dt_dx, qnx, spec_q;
+    int spec_np, nx0;
+    
+    if (rank == 0) {
+        spec_np = spec->np;
+        nx0 = spec->nx;
+        tem   = 0.5 * spec->dt/spec -> m_q;
+        dt_dx = spec->dt / spec->dx;
+        qnx = spec -> q *  spec->dx / spec->dt;
+        spec_q = spec -> q;
+    }
+
     MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    const float tem   = 0.5 * spec->dt/spec -> m_q;
-    const float dt_dx = spec->dt / spec->dx;
-    const float qnx = spec -> q *  spec->dx / spec->dt;
-    const int nx0 = spec -> nx;
-    const float spec_q = spec -> q;
-
-    MPI_Bcast((void*)&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast((void*)&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast((void*)&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     float3 *emf_E_part = emf -> E_part;
     float3 *emf_B_part = emf -> B_part;
