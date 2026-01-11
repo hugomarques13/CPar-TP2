@@ -1140,9 +1140,21 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
+    // Debug: print some current values before reduce
+    if (rank == 0) {
+        printf("[Rank %d] Before reduce - local_J[0] = (%f, %f, %f)\n", rank, local_J[0].x, local_J[0].y, local_J[0].z);
+        printf("[Rank %d] Before reduce - local_J[nx/2] = (%f, %f, %f)\n", rank, local_J[params.nx/2].x, local_J[params.nx/2].y, local_J[params.nx/2].z);
+    }
+    if (rank == 1 && size > 1) {
+        printf("[Rank %d] Before reduce - local_J[0] = (%f, %f, %f)\n", rank, local_J[0].x, local_J[0].y, local_J[0].z);
+        printf("[Rank %d] Before reduce - local_J[nx/2] = (%f, %f, %f)\n", rank, local_J[params.nx/2].x, local_J[params.nx/2].y, local_J[params.nx/2].z);
+    }
+
     // Reduce current buffer directly (current is already zeroed by current_zero before spec_advance)
     if (rank == 0) {
         MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+        printf("[Rank %d] After reduce - current->J[0] = (%f, %f, %f)\n", rank, current->J[0].x, current->J[0].y, current->J[0].z);
+        printf("[Rank %d] After reduce - current->J[nx/2] = (%f, %f, %f)\n", rank, current->J[params.nx/2].x, current->J[params.nx/2].y, current->J[params.nx/2].z);
     } else {
         MPI_Reduce(local_J_buf, NULL, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     }
