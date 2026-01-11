@@ -906,280 +906,240 @@ void interpolate_fld( const float3* restrict const E, const float3* restrict con
  * @param emf       EM fields
  * @param current   Current density
  */
-void spec_advance( t_species* spec, t_emf* emf, t_current* current )
+void spec_advance( t_species* spec, t_emf* emf, t_current* current)
 {
-    uint64_t t0 = timer_ticks();
-    
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    // ----- 1. Definição otimizada do tipo MPI para partículas -----
-    static MPI_Datatype mpi_part = MPI_DATATYPE_NULL;
-    static int type_initialized = 0;
-    
-    if (!type_initialized) {
-        // Usar estratégia da versão 2: tipo estruturado
-        int blocklen[5] = {1, 1, 1, 1, 1};
-        MPI_Aint disp[5];
-        MPI_Datatype types[5] = {MPI_INT, MPI_FLOAT, MPI_FLOAT, MPI_FLOAT, MPI_FLOAT};
-        
-        // Calcular deslocamentos de forma portável
-        t_part dummy;
-        disp[0] = (MPI_Aint)((char*)&dummy.ix - (char*)&dummy);
-        disp[1] = (MPI_Aint)((char*)&dummy.x - (char*)&dummy);
-        disp[2] = (MPI_Aint)((char*)&dummy.ux - (char*)&dummy);
-        disp[3] = (MPI_Aint)((char*)&dummy.uy - (char*)&dummy);
-        disp[4] = (MPI_Aint)((char*)&dummy.uz - (char*)&dummy);
-        
-        MPI_Type_create_struct(5, blocklen, disp, types, &mpi_part);
-        MPI_Type_commit(&mpi_part);
-        type_initialized = 1;
-    }
-    
-    // ----- 2. Broadcast eficiente de parâmetros -----
-    // Broadcast apenas dos parâmetros necessários para todos os ranks
-    struct {
-        int np_total;
-        int iter;
-        int nx;
-        float dt, dx, q, m_q;
-    } params;
-    
-    if (rank == 0) {
-        params.np_total = spec->np;
-        params.iter = spec->iter;
-        params.nx = spec->nx;
-        params.dt = spec->dt;
-        params.dx = spec->dx;
-        params.q = spec->q;
-        params.m_q = spec->m_q;
-    }
-    
-    MPI_Bcast(&params, sizeof(params), MPI_BYTE, 0, MPI_COMM_WORLD);
-    
-    // Atualizar estrutura local (versão 2 - todos os ranks consistentes)
+
+    uint64_t t0;
+    t0 = timer_ticks();
+
+    // Guarantee MPI initialized once
+
+    int rank = 0, size = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &size );
+
+    // Datatype for particle (contiguous fields only)
+    MPI_Datatype mpi_part;
+    int blocklen[5] = {1,1,1,1,1};
+    MPI_Aint disp[5];
+    disp[0] = offsetof(t_part, ix);
+    disp[1] = offsetof(t_part, x);
+    disp[2] = offsetof(t_part, ux);
+    disp[3] = offsetof(t_part, uy);
+    disp[4] = offsetof(t_part, uz);
+    MPI_Datatype types[5] = {MPI_INT, MPI_FLOAT, MPI_FLOAT, MPI_FLOAT, MPI_FLOAT};
+    MPI_Type_create_struct(5, blocklen, disp, types, &mpi_part);
+    MPI_Type_commit(&mpi_part);
+
+    // Broadcast scalar state to all ranks
+    int np_root = spec->np;
+    MPI_Bcast(&np_root, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->n_move, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Ensure buffers on non-root are big enough
     if (rank != 0) {
-        spec->np = params.np_total;
-        spec->iter = params.iter;
-        spec->nx = params.nx;
-        spec->dt = params.dt;
-        spec->dx = params.dx;
-        spec->q = params.q;
-        spec->m_q = params.m_q;
-        
-        // Garantir buffer suficiente (melhor da versão 2)
-        spec_grow_buffer(spec, params.np_total);
+        spec_grow_buffer(spec, np_root);
+        spec->np = np_root;
     }
-    
-    // ----- 3. Distribuição eficiente de partículas -----
-    // Calcular distribuição (melhor da versão 1 - clara e simples)
-    int base_count = params.np_total / size;
-    int remainder = params.np_total % size;
-    int local_np = base_count + (rank < remainder ? 1 : 0);
-    
-    // Alocar partículas locais
-    t_part *local_part = local_np > 0 ? malloc(local_np * sizeof(t_part)) : NULL;
-    
-    // Preparar arrays para scatter (usar alocação condicional da versão 1)
-    int *sendcounts = NULL, *displs = NULL;
-    if (rank == 0) {
-        sendcounts = malloc(size * sizeof(int));
-        displs = malloc(size * sizeof(int));
-        
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            int count = base_count + (i < remainder ? 1 : 0);
-            sendcounts[i] = count;
-            displs[i] = offset;
-            offset += count;
-        }
+
+    // Partition work
+    int base = np_root / size;
+    int rem = np_root % size;
+    int local_n = base + ((rank < rem) ? 1 : 0);
+
+    int *counts = malloc(size * sizeof(int));
+    int *displs = malloc(size * sizeof(int));
+    displs[0] = 0;
+    for (int r = 0; r < size; r++) {
+        counts[r] = base + ((r < rem) ? 1 : 0);
+        if (r > 0) displs[r] = displs[r-1] + counts[r-1];
     }
-    
-    // Scatter usando tipo estruturado (melhor da versão 2)
-    MPI_Scatterv(rank == 0 ? spec->part : NULL, sendcounts, displs, mpi_part,
-                 local_part, local_np, mpi_part, 0, MPI_COMM_WORLD);
-    
-    // ----- 4. Broadcast eficiente de campos EM -----
-    // Usar abordagem da versão 2 (direta, sem cópias extras)
+
+    t_part *local_part = (local_n > 0) ? malloc(local_n * sizeof(t_part)) : NULL;
+
+    // Scatter particles (root sends, others receive)
+    MPI_Scatterv(spec->part, counts, displs, mpi_part, local_part, local_n, mpi_part, 0, MPI_COMM_WORLD);
+
+    // Broadcast field buffers (contiguous float3 arrays)
     int emf_cells = emf->nx + emf->gc[0] + emf->gc[1];
-    MPI_Bcast(emf->E_part, emf_cells * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf->B_part, emf_cells * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf->E_buf, emf_cells * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf->B_buf, emf_cells * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    // current_zero must have been called before on all ranks
+
+    double energy_local = 0.0;
+    const int nx0 = spec -> nx;
+    const float tem   = 0.5 * spec->dt/spec -> m_q;
+    const float dt_dx = spec->dt / spec->dx;
+
+    // Auxiliary values for current deposition
+    const float qnx = spec -> q *  spec->dx / spec->dt;
     
-    // ----- 5. Zerar corrente localmente (melhor das duas versões) -----
-    // Cada rank zera sua própria seção da corrente
-    int current_size = current->gc[0] + current->nx + current->gc[1];
-    if (rank != 0) {
-        // Em ranks não-root, zerar o buffer
-        memset(current->J_buf, 0, current_size * 3 * sizeof(float));
-    }
-    // Nota: assumindo que rank 0 já chamou current_zero() antes
-    
-    // ----- 6. Constantes locais para otimização -----
-    const float tem = 0.5f * params.dt / params.m_q;
-    const float dt_dx = params.dt / params.dx;
-    const float qnx = params.q * params.dx / params.dt;
-    const int nx0 = params.nx;
-    
-    // ----- 7. Avanço de partículas (versão otimizada) -----
-    double local_energy = 0.0;
-    
-    for (int i = 0; i < local_np; i++) {
+    // Advance particles
+    for (int i=0; i<local_n; i++) {
+
         t_part *p = &local_part[i];
-        
+
         float3 Ep, Bp;
-        
-        // Interpolar campos
-        interpolate_fld(emf->E_part, emf->B_part, p, &Ep, &Bp);
-        
-        // ----- Boris pusher otimizado -----
-        // Primeira aceleração pelo campo E
+        float utx, uty, utz;
+        float ux, uy, uz, u2;
+        float gamma, rg, gtem, otsq;
+
+        float x1;
+
+        int di;
+        float dx;
+
+        // Load particle momenta
+        ux = p->ux;
+        uy = p->uy;
+        uz = p->uz;
+
+        // interpolate fields
+        interpolate_fld( emf -> E_part, emf -> B_part, p, &Ep, &Bp );
+        // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
+
+        // advance u using Boris scheme
         Ep.x *= tem;
         Ep.y *= tem;
         Ep.z *= tem;
-        
-        float utx = p->ux + Ep.x;
-        float uty = p->uy + Ep.y;
-        float utz = p->uz + Ep.z;
-        
-        // Calcular gamma no tempo intermediário
-        float u2 = utx*utx + uty*uty + utz*utz;
-        float gamma = sqrtf(1.0f + u2);
-        
-        // Acumular energia cinética: (γ - 1) * m (versão 1 mais precisa)
-        local_energy += (gamma - 1.0f);
-        
-        // Rotação pelo campo B
-        float gtem = tem / gamma;
+
+        utx = ux + Ep.x;
+        uty = uy + Ep.y;
+        utz = uz + Ep.z;
+
+        // Perform first half of the rotation
+        // Get time centered gamma
+        u2 = utx*utx + uty*uty + utz*utz;
+        gamma = sqrtf( 1 + u2 );
+
+        // Accumulate time centered energy
+        energy_local += u2 / ( 1 + gamma );
+
+        gtem = tem / gamma;
+
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
-        
-        float otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
-        
-        float ux = utx + uty*Bp.z - utz*Bp.y;
-        float uy = uty + utz*Bp.x - utx*Bp.z;
-        float uz = utz + utx*Bp.y - uty*Bp.x;
-        
+
+        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
+
+        ux = utx + uty*Bp.z - utz*Bp.y;
+        uy = uty + utz*Bp.x - utx*Bp.z;
+        uz = utz + utx*Bp.y - uty*Bp.x;
+
+        // Perform second half of the rotation
+
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
-        
+
         utx += uy*Bp.z - uz*Bp.y;
         uty += uz*Bp.x - ux*Bp.z;
         utz += ux*Bp.y - uy*Bp.x;
-        
-        // Segunda aceleração pelo campo E
+
+        // Perform second half of electric field acceleration
         ux = utx + Ep.x;
         uy = uty + Ep.y;
         uz = utz + Ep.z;
-        
-        // Armazenar novos momentos
+
+        // Store new momenta
+        //datarace
         p->ux = ux;
         p->uy = uy;
         p->uz = uz;
-        
-        // Mover partícula
-        float rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
-        float particle_dx = dt_dx * rg * ux;
-        float x1 = p->x + particle_dx;
-        
-        // Truncamento para célula (versão mais eficiente)
-        int di = (x1 >= 1.0f) - (x1 < 0.0f);
+
+        // push particle
+        rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
+
+        dx = dt_dx * rg * ux;
+
+        x1 = p->x + dx;
+
+        di = ( x1 >= 1.0f ) - ( x1 < 0.0f );
+
         x1 -= di;
-        
-        // Atualizar posição
+
+        float qvy = spec->q * uy * rg;
+        float qvz = spec->q * uz * rg;
+
+        // deposit current using Eskirepov method
+        // dep_current_esk( spec -> part[i].ix, di,
+        // 				 spec -> part[i].x, x1,
+        // 				 qnx, qvy, qvz,
+        // 				 current );
+        //datarace Current
+        dep_current_zamb( p->ix, di,
+                    p->x, dx,
+                            qnx, qvy, qvz,
+                            current );
+
+        // Store results
+        //datarace
         p->x = x1;
         p->ix += di;
-        
-        // Aplicar condições de contorno periódicas localmente
-        // (versão 1 - aplica imediatamente, melhor para cache)
-        if (p->ix < 0) p->ix += nx0;
-        else if (p->ix >= nx0) p->ix -= nx0;
-        
-        // Depositar corrente
-        float qvy = params.q * uy * rg;
-        float qvz = params.q * uz * rg;
-        
-        dep_current_zamb(p->ix, di, p->x - particle_dx, particle_dx,
-                        qnx, qvy, qvz, current);
     }
-    
-    // ----- 8. Redução paralela eficiente -----
-    // Reduzir energia (apenas para root, como versão 1)
-    double total_energy;
-    MPI_Reduce(&local_energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-    
-    // Reduzir corrente usando Allreduce (melhor da versão 2)
-    int jlen = current_size * 3;
+
+    // Reduce energy
+    double energy_total = 0.0;
+    MPI_Reduce(&energy_local, &energy_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    // Sum current across ranks
+    int jlen = (current->gc[0] + current->nx + current->gc[1]) * 3;
     MPI_Allreduce(MPI_IN_PLACE, current->J_buf, jlen, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-    
-    // ----- 9. Gather de partículas de volta -----
-    MPI_Gatherv(local_part, local_np, mpi_part,
-                rank == 0 ? spec->part : NULL, sendcounts, displs, mpi_part,
-                0, MPI_COMM_WORLD);
-    
-    // ----- 10. Pós-processamento no root -----
+
+    // Gather particles back to root
+    MPI_Gatherv(local_part, local_n, mpi_part, spec->part , counts, displs, mpi_part, 0, MPI_COMM_WORLD);
+
+    // Root finalizes bookkeeping
     if (rank == 0) {
-        // Calcular energia total
-        spec->energy = params.q * params.m_q * total_energy * params.dx;
-        spec->iter = params.iter + 1;
-        
-        // Aplicar condições de contorno de partículas
-        if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
-            if (spec->moving_window) {
-                spec_move_window(spec);
-            }
-            
-            // Remover partículas fora do domínio
+        spec -> energy = spec-> q * spec -> m_q * energy_total * spec -> dx;
+
+        spec -> iter += 1;
+
+        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+
+            if (spec -> moving_window ) spec_move_window( spec );
+
             int i = 0;
-            while (i < spec->np) {
-                if ((spec->part[i].ix < 0) || (spec->part[i].ix >= nx0)) {
-                    spec->part[i] = spec->part[--spec->np];
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
                     continue;
                 }
                 i++;
             }
+
         } else {
-            // Condições periódicas
-            for (int i = 0; i < spec->np; i++) {
-                if (spec->part[i].ix < 0) spec->part[i].ix += nx0;
-                else if (spec->part[i].ix >= nx0) spec->part[i].ix -= nx0;
+            for (int i=0; i<spec->np; i++) {
+                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
             }
         }
-        
-        // Ordenar se necessário
-        if (spec->n_sort > 0 && !(spec->iter % spec->n_sort)) {
-            spec_sort(spec);
+
+        if ( spec -> n_sort > 0 ) {
+            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
         }
-        
-        // Atualizar timing
-        _spec_npush += spec->np;
-        _spec_time += timer_interval_seconds(t0, timer_ticks());
+
+        _spec_npush += spec -> np;
+        _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
-    
-    // ----- 11. Broadcast de estado final (melhor da versão 2) -----
-    // Broadcast do número de partículas atualizado
+
+    // Broadcast updated counts/state to all ranks
     MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec->iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    
-    // Broadcast das partículas (apenas se o número mudou significativamente)
-    if (spec->np > 0) {
-        // Usar tipo MPI otimizado
-        MPI_Bcast(spec->part, spec->np, mpi_part, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&spec->n_move, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (rank != 0) {
+        spec_grow_buffer(spec, spec->np);
     }
-    
-    // Broadcast da energia (opcional - útil para diagnóstico em todos ranks)
+    MPI_Bcast(spec->part, spec->np, mpi_part, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec->energy, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    
-    // ----- 12. Cleanup -----
+
     free(local_part);
-    if (rank == 0) {
-        free(sendcounts);
-        free(displs);
-    }
-    
-    // Nota: mpi_part NÃO é liberado - reutilizado entre chamadas
+    free(counts);
+    free(displs);
+    MPI_Type_free(&mpi_part);
 }
 
 /*********************************************************************************************
