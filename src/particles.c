@@ -897,11 +897,14 @@ int ltrim( float x )
 
 // Custom MPI type for particle parameters
 typedef struct {
+    float3 *emf_E_part;
+    float3 *emf_B_part;
+    float spec_q;
+    int spec_np;
     float tem;
     float dt_dx;
     float qnx;
     float spec_q;
-    int spec_np;
     int nx;
 } t_particle_params;
 

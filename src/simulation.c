@@ -15,6 +15,8 @@
 #include "simulation.h"
 #include "timer.h"
 
+#include <mpi.h>
+
 /**
  * @brief Checks if there should be a report at this timestep
  * 
@@ -179,26 +181,30 @@ void sim_set_moving_window( t_simulation* sim ){
 void sim_report_energy( t_simulation* sim )
 {
 	int i;
+	int rank = 0;
 
-	double emf_energy[6];
-	double part_energy[ sim -> n_species ];
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	if (rank == 0) {
+		double emf_energy[6];
+		double part_energy[ sim -> n_species ];
 
-	emf_get_energy( &sim -> emf, emf_energy );
-	double tot_emf = emf_energy[0];
-	for( i = 1; i < 6; i++ ){
-		tot_emf += emf_energy[i];
+		emf_get_energy( &sim -> emf, emf_energy );
+		double tot_emf = emf_energy[0];
+		for( i = 1; i < 6; i++ ){
+			tot_emf += emf_energy[i];
+		}
+
+		double tot_part = 0;
+		for( i = 0; i < sim -> n_species; i++ ){
+			part_energy[i] = sim -> species[i].energy;
+			tot_part += part_energy[i];
+		}
+
+		printf("Energy (fields | particles | total) = %e %e %e\n",
+			tot_emf, tot_part, tot_emf+tot_part);
 	}
-
-	double tot_part = 0;
-	for( i = 0; i < sim -> n_species; i++ ){
-		part_energy[i] = sim -> species[i].energy;
-		tot_part += part_energy[i];
-	}
-
-	printf("Energy (fields | particles | total) = %e %e %e\n",
-		tot_emf, tot_part, tot_emf+tot_part);
-
 }
+
 
 /**
  * @brief Print report on simulation energy (fields/particles/total)
