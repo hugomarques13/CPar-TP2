@@ -1,6 +1,6 @@
 # GCC options
 CC = mpicc
-CFLAGS = -O3 -ffast-math -g -std=c99 -pedantic -Wall -fno-omit-frame-pointer
+CFLAGS = -O2 -ffast-math -g -std=c99 -pedantic -Wall -fno-omit-frame-pointer
 #CFLAGS = -Kfast -std=c99 
 LDFLAGS = -lm
 
