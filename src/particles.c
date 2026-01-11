@@ -938,14 +938,19 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // SIMPLIFY: Broadcast fields directly as they are
-    // Assuming emf->E_part and emf->B_part are contiguous arrays of float3
-    MPI_Bcast(emf->E_part, (nx0 + 1), MPI_FLOAT3_TYPE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf->B_part, (nx0 + 1), MPI_FLOAT3_TYPE, 0, MPI_COMM_WORLD);
+    // Allocate field arrays on ALL processes
+    float3 *emf_E_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
+    float3 *emf_B_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
     
-    // But if you don't have MPI_FLOAT3_TYPE defined, use MPI_BYTE with exact size
-    // MPI_Bcast(emf->E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-    // MPI_Bcast(emf->B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+        // Copy from root's emf structure
+        memcpy(emf_E_part, emf->E_part, (nx0 + 1) * sizeof(float3));
+        memcpy(emf_B_part, emf->B_part, (nx0 + 1) * sizeof(float3));
+    }
+    
+    // Broadcast field data
+    MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     // Calculate particle distribution
     int local_np = spec_np / size;
@@ -954,7 +959,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
     
-    // Simple scatter - root sends equal chunks to everyone
+    // Simple scatter
     int send_size = local_np * sizeof(t_part);
     MPI_Scatter(spec->part, send_size, MPI_BYTE,
                 local_part, send_size, MPI_BYTE,
@@ -962,22 +967,18 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     double energy = 0;
     
-    // SIMPLIFY: Allocate local J array with same layout as current->J
-    // Get the actual J array size from current structure
-    int J_size = nx0 + 2;  // Usually: nx cells + 1 guard on each side
-    
-    // Allocate with 1 extra guard cell on each side for safety
+    // Allocate local J array - need enough space for dep_current_zamb
+    // dep_current_zamb accesses J[ix] and J[ix+1] where ix ∈ [0, nx0-1]
+    // So we need indices 0 through nx0
+    int J_size = nx0 + 2;  // nx0+1 cells + 1 extra for safety
     float3 *local_J = (float3*) calloc(J_size, sizeof(float3));
     
-    // Clear global current array on all ranks before local deposition
-    // This ensures we start from zero for reduction
+    // Clear global current on root (others don't have current->J)
     if (rank == 0) {
-        // On root, clear the actual current->J
+        // Find out actual J allocation size from your code
+        // Usually: current->J = malloc((nx + 2) * sizeof(float3));
         memset(current->J, 0, J_size * sizeof(float3));
     }
-    
-    // All ranks clear their local copy
-    memset(local_J, 0, J_size * sizeof(float3));
 
     // Advance particles
     for (int i = 0; i < local_np; i++) {
@@ -994,8 +995,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uy = local_part[i].uy;
         uz = local_part[i].uz;
 
-        // interpolate fields
-        interpolate_fld(emf->E_part, emf->B_part, &local_part[i], &Ep, &Bp);
+        // interpolate fields - use local arrays
+        interpolate_fld(emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp);
 
         // advance u using Boris scheme
         Ep.x *= tem;
@@ -1053,7 +1054,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float qvy = spec_q * uy * rg;
         float qvz = spec_q * uz * rg;
 
-        // deposit current - use local_J which has same layout as current->J
+        // deposit current - use local_J
         dep_current_zamb(local_part[i].ix, di,
                         local_part[i].x, dx,
                         qnx, qvy, qvz,
@@ -1068,7 +1069,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Reduce current deposition - local_J to current->J
+    // Reduce current deposition - all ranks contribute local_J to root's current->J
     MPI_Reduce(local_J, current->J, J_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     
     // Gather particles back
@@ -1079,6 +1080,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Cleanup
     free(local_J);
     free(local_part);
+    free(emf_E_part);
+    free(emf_B_part);
 
     if (rank != 0) return;
 
