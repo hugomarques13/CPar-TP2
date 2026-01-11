@@ -982,8 +982,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         displs,
         MPI_BYTE,
         local_part,
-        local_np * sizeof(t_part),
-        MPI_BYTE,
+        local_np,
+        sizeof(t_part),
         0,
         MPI_COMM_WORLD
     );
@@ -1109,8 +1109,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Recolher partículas atualizadas
     MPI_Gatherv(
         local_part,
-        local_np * sizeof(t_part),
-        MPI_BYTE,
+        local_np,
+        sizeof(t_part),
         spec->part,
         counts,
         displs,
