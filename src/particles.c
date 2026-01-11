@@ -924,10 +924,16 @@ typedef struct {
  * @param emf       EM fields
  * @param current   Current density
  */
+
+static int _mpi_initialized = 0;
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
-    int rank, size;
+    if (!_mpi_initialized) {
+        MPI_Init(NULL, NULL);
+        _mpi_initialized = 1;
+    }
 
+    int rank, size;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -1088,44 +1094,47 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     free(local_J_buf);
     free(local_part);
+    
+    if (rank == 0) {
+        // Store energy
+        spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
 
-    // Store energy
-    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
+        // Advance internal iteration number
+        spec -> iter += 1;
 
-    // Advance internal iteration number
-    spec -> iter += 1;
+        // Check for particles leaving the box
+        if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
-    // Check for particles leaving the box
-    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+            // Move simulation window if needed
+            if (spec -> moving_window )	spec_move_window( spec );
 
-        // Move simulation window if needed
-        if (spec -> moving_window )	spec_move_window( spec );
-
-        // Use absorbing boundaries along x
-        int i = 0;
-        while ( i < spec -> np ) {
-            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
-                spec -> part[i] = spec -> part[ -- spec -> np ];
-                continue;
+            // Use absorbing boundaries along x
+            int i = 0;
+            while ( i < spec -> np ) {
+                if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                    spec -> part[i] = spec -> part[ -- spec -> np ];
+                    continue;
+                }
+                i++;
             }
-            i++;
+
+        } else {
+            // Use periodic boundaries in x
+            for (int i=0; i<spec->np; i++) {
+                spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+            }
         }
 
-    } else {
-        // Use periodic boundaries in x
-        for (int i=0; i<spec->np; i++) {
-            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+        // Sort species at every n_sort time steps
+        if ( spec -> n_sort > 0 ) {
+            if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
         }
-    }
 
-    // Sort species at every n_sort time steps
-    if ( spec -> n_sort > 0 ) {
-        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+        // Timing info
+        _spec_npush += spec -> np;
+        _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
-
-    // Timing info
-    _spec_npush += spec -> np;
-    _spec_time += timer_interval_seconds( t0, timer_ticks() );
+    MPI_Barrier();
 }
 
 /*********************************************************************************************
