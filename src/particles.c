@@ -976,14 +976,45 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     float3 *local_E = local_E_buf + 1;
     float3 *local_B = local_B_buf + 1;
 
+    // Distribute particles (handle uneven division)
     int local_np = params.spec_np / size;
+    int remainder = params.spec_np % size;
+    
+    // First 'remainder' ranks get one extra particle
+    if (rank < remainder) {
+        local_np++;
+    }
+
+    // Calculate send counts and displacements for Scatterv
+    int *sendcounts = NULL;
+    int *displs = NULL;
+    
+    if (rank == 0) {
+        sendcounts = (int*) malloc(size * sizeof(int));
+        displs = (int*) malloc(size * sizeof(int));
+        
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            sendcounts[i] = (params.spec_np / size) * sizeof(t_part);
+            if (i < remainder) {
+                sendcounts[i] += sizeof(t_part);
+            }
+            displs[i] = offset;
+            offset += sendcounts[i];
+        }
+    }
 
     // Store part in a local variable to avoid sending all of spec
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
 
-    MPI_Scatter(spec->part, local_np * sizeof(t_part), MPI_BYTE,
-                local_part, local_np * sizeof(t_part), MPI_BYTE,
-                0, MPI_COMM_WORLD);
+    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
+                 local_part, local_np * sizeof(t_part), MPI_BYTE,
+                 0, MPI_COMM_WORLD);
+    
+    if (rank == 0) {
+        free(sendcounts);
+        free(displs);
+    }
 
                 
     double energy = 0;
@@ -1102,9 +1133,33 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     MPI_Reduce(local_J_buf, current->J_buf, (1 + params.nx + 2) * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
-            spec->part, local_np * sizeof(t_part), MPI_BYTE,
-            0, MPI_COMM_WORLD);
+    // Gather particles back (use Gatherv to handle uneven distribution)
+    int *recvcounts = NULL;
+    int *recvdispls = NULL;
+    
+    if (rank == 0) {
+        recvcounts = (int*) malloc(size * sizeof(int));
+        recvdispls = (int*) malloc(size * sizeof(int));
+        
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            recvcounts[i] = (params.spec_np / size) * sizeof(t_part);
+            if (i < remainder) {
+                recvcounts[i] += sizeof(t_part);
+            }
+            recvdispls[i] = offset;
+            offset += recvcounts[i];
+        }
+    }
+
+    MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
+                spec->part, recvcounts, recvdispls, MPI_BYTE,
+                0, MPI_COMM_WORLD);
+    
+    if (rank == 0) {
+        free(recvcounts);
+        free(recvdispls);
+    }
 
     free(local_J_buf);
     free(local_part);
