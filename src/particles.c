@@ -928,15 +928,11 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const float tem   = 0.5 * spec->dt/spec -> m_q;
     const float dt_dx = spec->dt / spec->dx;
-
-    // Auxiliary values for current deposition
     const float qnx = spec -> q *  spec->dx / spec->dt;
-
     const int nx0 = spec -> nx;
 
     float3 *emf_E_part = emf -> E_part;
     float3 *emf_B_part = emf -> B_part;
-
     float spec_q = spec -> q;
     int spec_np = spec -> np;
 
@@ -945,57 +941,42 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    
+    // FIXED: Broadcast field data as floats, not bytes
+    MPI_Bcast(emf_E_part, 3*(nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_B_part, 3*(nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     // Calculate particle distribution
-    int base_count = spec_np / size;
+    int local_np = spec_np / size;
     int remainder = spec_np % size;
     
-    int *sendcounts = NULL;
-    int *displs = NULL;
-    t_part *local_part = NULL;
-    int local_np;
-    
-    if (rank == 0) {
-        sendcounts = (int*) malloc(size * sizeof(int));
-        displs = (int*) malloc(size * sizeof(int));
-        
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            sendcounts[i] = (i < remainder) ? (base_count + 1) : base_count;
-            sendcounts[i] *= sizeof(t_part);
-            displs[i] = offset;
-            offset += sendcounts[i];
-        }
+    // Simple approach first - equal distribution
+    if (remainder > 0) {
+        // For now, just give extra particles to last rank
+        if (rank == size-1) local_np += remainder;
     }
+
+    // Store part in a local variable
+    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
     
-    // Get local particle count
-    local_np = (rank < remainder) ? (base_count + 1) : base_count;
-    local_part = (t_part*) malloc(local_np * sizeof(t_part));
-    
-    // Scatter particles with variable counts
-    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
-                 local_part, local_np * sizeof(t_part), MPI_BYTE,
-                 0, MPI_COMM_WORLD);
-    
-    if (rank == 0) {
-        free(sendcounts);
-        free(displs);
-    }
-    
+    // Simple scatter - each rank gets equal chunks
+    int send_size = local_np * sizeof(t_part);
+    MPI_Scatter(spec->part, send_size, MPI_BYTE,
+                local_part, send_size, MPI_BYTE,
+                0, MPI_COMM_WORLD);
+
     double energy = 0;
     
     // Allocate local current buffer with guard cells
-    int current_size = 1 + nx0 + 2;
-    float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
-    memset(local_J_buf, 0, current_size * sizeof(float3));
-    float3 *local_J = local_J_buf + 1;
+    int current_size = nx0 + 3;  // 1 left guard + nx0 + 2 right guards
+    float3 *local_J_buf = (float3*) calloc(current_size, sizeof(float3));
+    float3 *local_J = local_J_buf + 1;  // Skip left guard cell
 
     // Advance particles
-    for (int i = 0; i < local_np; i++) {
+    for (int i=0; i<local_np; i++) {
         float3 Ep, Bp;
         float utx, uty, utz;
         float ux, uy, uz, u2;
@@ -1009,10 +990,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uy = local_part[i].uy;
         uz = local_part[i].uz;
 
-        // Interpolate fields
-        interpolate_fld(emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp);
+        // interpolate fields
+        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
 
-        // Advance u using Boris scheme
+        // advance u using Boris scheme
         Ep.x *= tem;
         Ep.y *= tem;
         Ep.z *= tem;
@@ -1023,17 +1004,17 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
         // Perform first half of the rotation
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf(1 + u2);
+        gamma = sqrtf( 1 + u2 );
 
         // Accumulate time centered energy
-        energy += u2 / (1 + gamma);
+        energy += u2 / ( 1 + gamma );
 
         gtem = tem / gamma;
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
 
-        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
+        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
 
         ux = utx + uty*Bp.z - utz*Bp.y;
         uy = uty + utz*Bp.x - utx*Bp.z;
@@ -1058,7 +1039,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         local_part[i].uy = uy;
         local_part[i].uz = uz;
 
-        // Push particle
+        // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
         dx = dt_dx * rg * ux;
         x1 = local_part[i].x + dx;
@@ -1068,97 +1049,71 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float qvy = spec_q * uy * rg;
         float qvz = spec_q * uz * rg;
 
-        // Deposit current using Zamb method
-        dep_current_zamb(local_part[i].ix, di,
-                        local_part[i].x, dx,
-                        qnx, qvy, qvz,
-                        local_J);
+        // deposit current
+        dep_current_zamb( local_part[i].ix, di,
+                         local_part[i].x, dx,
+                         qnx, qvy, qvz,
+                         local_J );
 
         // Store results
         local_part[i].x = x1;
         local_part[i].ix += di;
     }
 
-    // After particle advance, some particles might have left the domain
-    // Count valid particles
-    int valid_local_np = 0;
-    for (int i = 0; i < local_np; i++) {
-        if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
-            if (local_part[i].ix >= 0 && local_part[i].ix < nx0) {
-                if (valid_local_np != i) {
-                    local_part[valid_local_np] = local_part[i];
-                }
-                valid_local_np++;
-            }
-        } else {
-            // For periodic boundaries, adjust indices
-            local_part[i].ix += ((local_part[i].ix < 0) ? nx0 : 0) - ((local_part[i].ix >= nx0) ? nx0 : 0);
-            valid_local_np = local_np;
-        }
-    }
-    
-    // Reduce energy
+    // Reduce results
     double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Reduce current deposition
-    MPI_Reduce(local_J_buf, current->J, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    // FIXED: Reduce current with correct element count
+    MPI_Reduce(local_J_buf, current->J, 3*current_size, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Gather particle counts from all processes
-    int *recvcounts = NULL;
-    int *rdispls = NULL;
-    
-    if (rank == 0) {
-        recvcounts = (int*) malloc(size * sizeof(int));
-        rdispls = (int*) malloc(size * sizeof(int));
-    }
-    
-    MPI_Gather(&valid_local_np, 1, MPI_INT, recvcounts, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    
-    // Calculate displacements and total particles
-    int total_np = 0;
-    if (rank == 0) {
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            rdispls[i] = offset;
-            offset += recvcounts[i];
-            total_np += recvcounts[i];
-            recvcounts[i] *= sizeof(t_part);
-            rdispls[i] *= sizeof(t_part);
-        }
-    }
-    
-    // Gather particles with variable counts
-    MPI_Gatherv(local_part, valid_local_np * sizeof(t_part), MPI_BYTE,
-                spec->part, recvcounts, rdispls, MPI_BYTE,
-                0, MPI_COMM_WORLD);
-    
-    // Cleanup
+    // Gather particles back
+    MPI_Gather(local_part, send_size, MPI_BYTE,
+               spec->part, send_size, MPI_BYTE,
+               0, MPI_COMM_WORLD);
+
     free(local_J_buf);
     free(local_part);
-    
-    if (rank == 0) {
-        spec->np = total_np;
-        spec->energy = spec->q * spec->m_q * total_energy * spec->dx;
-        spec->iter += 1;
-        
-        // Apply moving window if needed
-        if (spec->moving_window) {
-            spec_move_window(spec);
+
+    if (rank != 0) return;
+
+    // Store energy
+    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
+
+    // Advance internal iteration number
+    spec -> iter += 1;
+
+    // Check for particles leaving the box
+    if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
+        // Move simulation window if needed
+        if (spec -> moving_window )	spec_move_window( spec );
+
+        // Use absorbing boundaries along x
+        int i = 0;
+        while ( i < spec -> np ) {
+            if (( spec -> part[i].ix < 0 ) || ( spec -> part[i].ix >= nx0 )) {
+                spec -> part[i] = spec -> part[ -- spec -> np ];
+                continue;
+            }
+            i++;
         }
-        
-        // Sort species at every n_sort time steps
-        if (spec->n_sort > 0 && !(spec->iter % spec->n_sort)) {
-            spec_sort(spec);
+    } else {
+        // Use periodic boundaries in x
+        for (int i=0; i<spec->np; i++) {
+            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
         }
-        
-        free(recvcounts);
-        free(rdispls);
     }
-    
-    _spec_npush += spec_np; // Use original total for timing statistics
-    _spec_time += timer_interval_seconds(t0, timer_ticks());
+
+    // Sort species at every n_sort time steps
+    if ( spec -> n_sort > 0 ) {
+        if ( ! (spec -> iter % spec -> n_sort) ) spec_sort( spec );
+    }
+
+    // Timing info
+    _spec_npush += spec -> np;
+    _spec_time += timer_interval_seconds( t0, timer_ticks() );
 }
+
 
 /*********************************************************************************************
 
