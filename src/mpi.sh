@@ -4,6 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=2
 #SBATCH --time=00:30:00
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
 
 # Load MPI module
 ml OpenMPI
