@@ -39,7 +39,7 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 //#include "input/absorbing.c"
 //#include "input/density.c"
 
-int main (int argc, const char ** argv) {
+int main (int argc, char ** argv) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
