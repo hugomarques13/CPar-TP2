@@ -928,6 +928,7 @@ typedef struct {
 static int _mpi_initialized = 0;
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
+    /*
     if (!_mpi_initialized) {
         MPI_Init(NULL, NULL);
         _mpi_initialized = 1;
@@ -936,7 +937,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     int rank, size;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
-
+    */
+   
     uint64_t t0;
     t0 = timer_ticks();
 
@@ -1134,7 +1136,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         _spec_npush += spec -> np;
         _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
-    MPI_Barrier();
 }
 
 /*********************************************************************************************

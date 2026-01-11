@@ -40,52 +40,73 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 //#include "input/density.c"
 
 int main (int argc, const char * argv[]) {
-	// Initialize simulation
-	t_simulation sim;
-	sim_init( &sim );
+    
+    // Initialize MPI first
+    MPI_Init(&argc, (char***)&argv);
+    
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    // Apenas o master (rank 0) faz I/O inicial
+    if (rank == 0) {
+        printf("Starting simulation ...\n\n");
+        printf("n = 0, t = 0.0\n");
+    }
+    
+    // Initialize simulation - todos os processos fazem isto
+    t_simulation sim;
+    sim_init( &sim );
 
-    // Run simulation
-	int n;
-	float t;
+    int n;
+    float t;
     double en_in, en_out;
-    
-	printf("Starting simulation ...\n\n");
 
-	uint64_t t0,t1;
-	t0 = timer_ticks();
-    printf("n = 0, t = 0.0\n");
+    uint64_t t0, t1;
+    t0 = timer_ticks();
 
-	for (n=0,t=0.0; t<=sim.tmax; n++, t=n*sim.dt) {
-        //printf("n = %i, t = %f\n",n,t);
-
-		if ( report ( n , sim.ndump ) )	sim_report( &sim );
-
-		sim_iter( &sim );
-
-        if (n==0){
-            sim_report_energy_ret( &sim, &en_in);
-            sim_report_energy (&sim);
+    // Loop de simulação - todos os processos participam
+    for (n=0, t=0.0; t<=sim.tmax; n++, t=n*sim.dt) {
+        
+        // Apenas master faz report
+        if (rank == 0 && report(n, sim.ndump)) {
+            sim_report(&sim);
         }
-	}
-    printf("n = %i, t = %f\n",n,t);
 
-	t1 = timer_ticks();
-	fprintf(stderr, "\nSimulation ended.\n\n");
-    sim_report_energy( &sim );
-    sim_report_energy_ret( &sim, &en_out );
-    printf("Initial energy: %e, Final energy: %e\n", en_in, en_out);
-    double ratio=100*fabs((en_in-en_out)/en_out);
-    printf("\nFinal energy different from Initial Energy. Change in total energy is: %.2f %% \n",ratio);
-    if (ratio>5) { printf("ERROR: Large Change\n"); return 1; }
+        sim_iter(&sim);  // spec_advance paralelizado aqui
 
+        if (n==0) {
+            sim_report_energy_ret(&sim, &en_in);
+            if (rank == 0) {
+                sim_report_energy(&sim);
+            }
+        }
+    }
 
-	// Simulation times
-    sim_timings( &sim, t0, t1 );
+    t1 = timer_ticks();
+    
+    // Apenas master faz output final
+    if (rank == 0) {
+        printf("n = %i, t = %f\n", n, t);
+        fprintf(stderr, "\nSimulation ended.\n\n");
+        sim_report_energy(&sim);
+        sim_report_energy_ret(&sim, &en_out);
+        printf("Initial energy: %e, Final energy: %e\n", en_in, en_out);
+        double ratio = 100 * fabs((en_in - en_out) / en_out);
+        printf("\nFinal energy different from Initial Energy. Change in total energy is: %.2f %% \n", ratio);
+        if (ratio > 5) {
+            printf("ERROR: Large Change\n");
+        }
 
+        // Simulation times
+        sim_timings(&sim, t0, t1);
+    }
+
+    // Cleanup data - todos os processos
+    sim_delete(&sim);
+    
+    // Finalize MPI
     MPI_Finalize();
-    
-    // Cleanup data
-    sim_delete( &sim );
-    
-	return 0;
+
+    return 0;
 }
