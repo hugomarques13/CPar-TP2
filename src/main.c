@@ -81,8 +81,6 @@ int main (int argc, const char * argv[]) {
 
 	// Simulation times
     sim_timings( &sim, t0, t1 );
-
-    MPI_Finalize();
     
     // Cleanup data
     sim_delete( &sim );

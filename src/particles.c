@@ -1094,6 +1094,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     free(local_J_buf);
     free(local_part);
+    MPI_Finalize();
     
     if (rank == 0) {
         // Store energy
@@ -1134,7 +1135,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         _spec_npush += spec -> np;
         _spec_time += timer_interval_seconds( t0, timer_ticks() );
     }
-    MPI_Barrier();
+    
 }
 
 /*********************************************************************************************
