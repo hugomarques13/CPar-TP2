@@ -928,11 +928,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const float tem   = 0.5 * spec->dt/spec -> m_q;
     const float dt_dx = spec->dt / spec->dx;
+
+    // Auxiliary values for current deposition
     const float qnx = spec -> q *  spec->dx / spec->dt;
+
     const int nx0 = spec -> nx;
 
-    float3 *emf_E_part = emf -> E_part;
-    float3 *emf_B_part = emf -> B_part;
     float spec_q = spec -> q;
     int spec_np = spec -> np;
 
@@ -941,42 +942,94 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     MPI_Bcast(&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&nx0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    
-    // FIXED: Broadcast field data as floats, not bytes
-    MPI_Bcast(emf_E_part, 3*(nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, 3*(nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
-    
     MPI_Bcast(&spec_q, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Calculate particle distribution
-    int local_np = spec_np / size;
-    int remainder = spec_np % size;
+    // Allocate field buffers for MPI broadcast
+    float *E_flat = NULL;
+    float *B_flat = NULL;
+    float3 *emf_E_part = NULL;
+    float3 *emf_B_part = NULL;
     
-    // Simple approach first - equal distribution
-    if (remainder > 0) {
-        // For now, just give extra particles to last rank
-        if (rank == size-1) local_np += remainder;
+    int field_size = 3 * (nx0 + 1);
+    
+    E_flat = (float*)malloc(field_size * sizeof(float));
+    B_flat = (float*)malloc(field_size * sizeof(float));
+    emf_E_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
+    emf_B_part = (float3*)malloc((nx0 + 1) * sizeof(float3));
+    
+    if (rank == 0) {
+        // Pack 3D field data into 1D float arrays
+        for (int i = 0; i <= nx0; i++) {
+            E_flat[3*i]   = emf->E_part[i].x;
+            E_flat[3*i+1] = emf->E_part[i].y;
+            E_flat[3*i+2] = emf->E_part[i].z;
+            
+            B_flat[3*i]   = emf->B_part[i].x;
+            B_flat[3*i+1] = emf->B_part[i].y;
+            B_flat[3*i+2] = emf->B_part[i].z;
+        }
+    }
+    
+    // Broadcast field data as flat float arrays
+    MPI_Bcast(E_flat, field_size, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(B_flat, field_size, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
+    // Unpack into float3 arrays on all ranks
+    for (int i = 0; i <= nx0; i++) {
+        emf_E_part[i].x = E_flat[3*i];
+        emf_E_part[i].y = E_flat[3*i+1];
+        emf_E_part[i].z = E_flat[3*i+2];
+        
+        emf_B_part[i].x = B_flat[3*i];
+        emf_B_part[i].y = B_flat[3*i+1];
+        emf_B_part[i].z = B_flat[3*i+2];
     }
 
-    // Store part in a local variable
-    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
+    // Calculate particle distribution
+    int base_count = spec_np / size;
+    int remainder = spec_np % size;
     
-    // Simple scatter - each rank gets equal chunks
-    int send_size = local_np * sizeof(t_part);
-    MPI_Scatter(spec->part, send_size, MPI_BYTE,
-                local_part, send_size, MPI_BYTE,
-                0, MPI_COMM_WORLD);
-
+    int *sendcounts = NULL;
+    int *displs = NULL;
+    t_part *local_part = NULL;
+    int local_np;
+    
+    local_np = (rank < remainder) ? (base_count + 1) : base_count;
+    local_part = (t_part*) malloc(local_np * sizeof(t_part));
+    
+    if (rank == 0) {
+        sendcounts = (int*) malloc(size * sizeof(int));
+        displs = (int*) malloc(size * sizeof(int));
+        
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            int count = (i < remainder) ? (base_count + 1) : base_count;
+            sendcounts[i] = count * sizeof(t_part);
+            displs[i] = offset;
+            offset += sendcounts[i];
+        }
+    }
+    
+    // Scatter particles with variable counts
+    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
+                 local_part, local_np * sizeof(t_part), MPI_BYTE,
+                 0, MPI_COMM_WORLD);
+    
+    if (rank == 0) {
+        free(sendcounts);
+        free(displs);
+    }
+    
     double energy = 0;
     
     // Allocate local current buffer with guard cells
-    int current_size = nx0 + 3;  // 1 left guard + nx0 + 2 right guards
-    float3 *local_J_buf = (float3*) calloc(current_size, sizeof(float3));
-    float3 *local_J = local_J_buf + 1;  // Skip left guard cell
+    int current_total_size = nx0 + 3;  // 1 left guard + nx0 + 2 right guards
+    float3 *local_J_buf = (float3*) calloc(current_total_size, sizeof(float3));
+    float3 *local_J = local_J_buf + 1;  // Offset by left guard cell
 
     // Advance particles
-    for (int i=0; i<local_np; i++) {
+    for (int i = 0; i < local_np; i++) {
         float3 Ep, Bp;
         float utx, uty, utz;
         float ux, uy, uz, u2;
@@ -991,7 +1044,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = local_part[i].uz;
 
         // interpolate fields
-        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
+        interpolate_fld(emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp);
 
         // advance u using Boris scheme
         Ep.x *= tem;
@@ -1004,17 +1057,17 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
         // Perform first half of the rotation
         u2 = utx*utx + uty*uty + utz*utz;
-        gamma = sqrtf( 1 + u2 );
+        gamma = sqrtf(1 + u2);
 
         // Accumulate time centered energy
-        energy += u2 / ( 1 + gamma );
+        energy += u2 / (1 + gamma);
 
         gtem = tem / gamma;
         Bp.x *= gtem;
         Bp.y *= gtem;
         Bp.z *= gtem;
 
-        otsq = 2.0f / ( 1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z );
+        otsq = 2.0f / (1.0f + Bp.x*Bp.x + Bp.y*Bp.y + Bp.z*Bp.z);
 
         ux = utx + uty*Bp.z - utz*Bp.y;
         uy = uty + utz*Bp.x - utx*Bp.z;
@@ -1049,31 +1102,77 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float qvy = spec_q * uy * rg;
         float qvz = spec_q * uz * rg;
 
-        // deposit current
-        dep_current_zamb( local_part[i].ix, di,
-                         local_part[i].x, dx,
-                         qnx, qvy, qvz,
-                         local_J );
+        // deposit current using Zamb method
+        dep_current_zamb(local_part[i].ix, di,
+                        local_part[i].x, dx,
+                        qnx, qvy, qvz,
+                        local_J);
 
         // Store results
         local_part[i].x = x1;
         local_part[i].ix += di;
     }
 
-    // Reduce results
+    // After particle advance, handle boundaries locally
+    int valid_local_np = 0;
+    for (int i = 0; i < local_np; i++) {
+        if (spec->moving_window || spec->bc_type == PART_BC_OPEN) {
+            if (local_part[i].ix >= 0 && local_part[i].ix < nx0) {
+                if (valid_local_np != i) {
+                    local_part[valid_local_np] = local_part[i];
+                }
+                valid_local_np++;
+            }
+        } else {
+            // For periodic boundaries, adjust indices
+            local_part[i].ix += ((local_part[i].ix < 0) ? nx0 : 0) - ((local_part[i].ix >= nx0) ? nx0 : 0);
+            valid_local_np = local_np;
+        }
+    }
+
+    // Reduce energy
     double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // FIXED: Reduce current with correct element count
-    MPI_Reduce(local_J_buf, current->J, 3*current_size, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    // Reduce current deposition - FIXED: use proper size
+    MPI_Reduce(local_J_buf, current->J, current_total_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    // Gather particles back
-    MPI_Gather(local_part, send_size, MPI_BYTE,
-               spec->part, send_size, MPI_BYTE,
-               0, MPI_COMM_WORLD);
-
+    // Gather particle counts from all processes
+    int *recvcounts = NULL;
+    int *rdispls = NULL;
+    
+    if (rank == 0) {
+        recvcounts = (int*) malloc(size * sizeof(int));
+        rdispls = (int*) malloc(size * sizeof(int));
+    }
+    
+    MPI_Gather(&valid_local_np, 1, MPI_INT, recvcounts, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    // Calculate displacements and total particles
+    int total_np = 0;
+    if (rank == 0) {
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            rdispls[i] = offset;
+            offset += recvcounts[i];
+            total_np += recvcounts[i];
+            recvcounts[i] *= sizeof(t_part);
+            rdispls[i] *= sizeof(t_part);
+        }
+    }
+    
+    // Gather particles with variable counts
+    MPI_Gatherv(local_part, valid_local_np * sizeof(t_part), MPI_BYTE,
+                spec->part, recvcounts, rdispls, MPI_BYTE,
+                0, MPI_COMM_WORLD);
+    
+    // Cleanup
     free(local_J_buf);
     free(local_part);
+    free(E_flat);
+    free(B_flat);
+    free(emf_E_part);
+    free(emf_B_part);
 
     if (rank != 0) return;
 
