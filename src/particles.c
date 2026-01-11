@@ -925,39 +925,58 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     uint64_t t0;
     t0 = timer_ticks();
 
+    // Broadcast parameters from rank 0 to all ranks
+    int spec_np = spec->np;
+    MPI_Bcast(&spec_np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
     const float tem   = 0.5 * spec->dt/spec -> m_q;
     const float dt_dx = spec->dt / spec->dx;
-
-    // Auxiliary values for current deposition
     const float qnx = spec -> q *  spec->dx / spec->dt;
-
     const int nx0 = spec -> nx;
+    const float spec_q = spec -> q;
+
+    MPI_Bcast((void*)&tem, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast((void*)&dt_dx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast((void*)&qnx, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     float3 *emf_E_part = emf -> E_part;
     float3 *emf_B_part = emf -> B_part;
 
-    // Broadcast spec data to all ranks
-    MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(spec->part, spec->np * sizeof(t_part), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_E_part, (nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(emf_B_part, (nx0 + 1), MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    // Broadcast current data to all ranks
-    int current_size = current->gc[0] + current->nx + current->gc[1];
-    MPI_Bcast(current->J_buf, current_size * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
+    // Calculate how many particles each rank gets
+    int local_np = spec_np / size;
+    int remainder = spec_np % size;
+    if (rank < remainder) local_np++;
 
-    // Broadcast EMF data
-    MPI_Bcast(emf_E_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(emf_B_part, (nx0 + 1) * sizeof(float3), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    double energy = 0;
+    // Prepare scatter counts and displacements
+    int *sendcounts = (int*) malloc(size * sizeof(int));
+    int *displs = (int*) malloc(size * sizeof(int));
     
-    // Allocate local current buffer with guard cells (gc[0]=1, gc[1]=2)
+    int disp = 0;
+    for (int i = 0; i < size; i++) {
+        sendcounts[i] = (spec_np / size) + (i < remainder ? 1 : 0);
+        displs[i] = disp;
+        disp += sendcounts[i];
+    }
+
+    // Scatter particles
+    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
+    MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
+                 local_part, local_np * sizeof(t_part), MPI_BYTE,
+                 0, MPI_COMM_WORLD);
+
+    // Setup local current buffer with guard cells
+    int current_size = current->gc[0] + current->nx + current->gc[1];
     float3 *local_J_buf = (float3*) malloc(current_size * sizeof(float3));
     memset(local_J_buf, 0, current_size * sizeof(float3));
-    // Offset pointer like current->J does
     float3 *local_J = local_J_buf + current->gc[0];
 
-    // Advance particles
-    for (int i=0; i<spec->np; i++) {
+    double energy = 0;
+
+    // Advance particles on this rank
+    for (int i=0; i<local_np; i++) {
 
         float3 Ep, Bp;
         float utx, uty, utz;
@@ -970,13 +989,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = spec->part[i].ux;
-        uy = spec->part[i].uy;
-        uz = spec->part[i].uz;
+        ux = local_part[i].ux;
+        uy = local_part[i].uy;
+        uz = local_part[i].uz;
 
         // interpolate fields
-        interpolate_fld( emf_E_part, emf_B_part, &spec->part[i], &Ep, &Bp );
-        // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
+        interpolate_fld( emf_E_part, emf_B_part, &local_part[i], &Ep, &Bp );
 
         // advance u using Boris scheme
         Ep.x *= tem;
@@ -988,7 +1006,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         utz = uz + Ep.z;
 
         // Perform first half of the rotation
-        // Get time centered gamma
         u2 = utx*utx + uty*uty + utz*utz;
         gamma = sqrtf( 1 + u2 );
 
@@ -1008,7 +1025,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + utx*Bp.y - uty*Bp.x;
 
         // Perform second half of the rotation
-
         Bp.x *= otsq;
         Bp.y *= otsq;
         Bp.z *= otsq;
@@ -1023,46 +1039,55 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        spec->part[i].ux = ux;
-        spec->part[i].uy = uy;
-        spec->part[i].uz = uz;
+        local_part[i].ux = ux;
+        local_part[i].uy = uy;
+        local_part[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
         dx = dt_dx * rg * ux;
 
-        x1 = spec->part[i].x + dx;
+        x1 = local_part[i].x + dx;
 
         di = ltrim(x1);
 
         x1 -= di;
 
-        float qvy = spec->q * uy * rg;
-        float qvz = spec->q * uz * rg;
+        float qvy = spec_q * uy * rg;
+        float qvz = spec_q * uz * rg;
 
         // deposit current
-        dep_current_zamb( spec->part[i].ix, di,
-                         spec->part[i].x, dx,
+        dep_current_zamb( local_part[i].ix, di,
+                         local_part[i].x, dx,
                          qnx, qvy, qvz,
                          local_J );
 
         // Store results
-        spec->part[i].x = x1;
-        spec->part[i].ix += di;
-
+        local_part[i].x = x1;
+        local_part[i].ix += di;
     }
 
-    // Reduce local currents to rank 0
+    // Reduce currents back to rank 0
     double total_energy = 0.0;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    MPI_Reduce(local_J_buf, current->J_buf, current_size * sizeof(float3), MPI_BYTE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
+    // Gather particles back to rank 0
+    MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
+                 spec->part, sendcounts, displs, MPI_BYTE,
+                 0, MPI_COMM_WORLD);
+
+    free(local_part);
     free(local_J_buf);
+    free(sendcounts);
+    free(displs);
 
     if (rank != 0) return;
 
+    // Only rank 0 continues with boundary conditions and finalization
+    
     // Store energy
     spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
 
