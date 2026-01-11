@@ -895,14 +895,13 @@ int ltrim( float x )
     return ( x >= 1.0f ) - ( x < 0.0f );
 }
 
+// Custom MPI type for particle parameters
 typedef struct {
-    float3 *emf_E_part;
-    float3 *emf_B_part;
-    float spec_q;
-    float spec_np;
     float tem;
     float dt_dx;
     float qnx;
+    float spec_q;
+    int spec_np;
     int nx;
 } t_particle_params;
 
@@ -924,13 +923,9 @@ typedef struct {
  * @param emf       EM fields
  * @param current   Current density
  */
-
-
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     int rank, size;
-    MPI_Status status;
-
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -941,26 +936,25 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     const float dt_dx = spec->dt / spec->dx;
 
     // Auxiliary values for current deposition
-    const float qnx = spec -> q *  spec->dx / spec->dt;
-
+    const float qnx = spec -> q * spec->dx / spec->dt;
     const int nx0 = spec -> nx;
 
-    // Pack parameters into a struct for broadcast
+    double energy = 0;
+
+    // Create particle parameters struct for broadcasting
     t_particle_params params = {
-        .emf_E_part = emf -> E_part,
-        .emf_B_part = emf -> B_part,
-        .spec_q     = spec -> q,
-        .spec_np    = spec -> np,
-        .tem        = tem,
-        .dt_dx      = dt_dx,
-        .qnx        = qnx,
-        .nx         = spec -> nx
+        .tem = tem,
+        .dt_dx = dt_dx,
+        .qnx = qnx,
+        .spec_q = spec -> q,
+        .spec_np = spec -> np,
+        .nx = spec -> nx
     };
 
     // Broadcast parameters to all processes
     MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-    // Distribute particles evenly among processes
+    // Calculate how many particles each process handles
     int local_np = params.spec_np / size;
     int remainder = params.spec_np % size;
     
@@ -972,16 +966,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Calculate starting index for this process
     int start_idx = 0;
     for (int i = 0; i < rank; i++) {
-        int proc_np = params.spec_np / size;
-        if (i < remainder) proc_np++;
-        start_idx += proc_np;
+        start_idx += (params.spec_np / size) + (i < remainder ? 1 : 0);
     }
 
-    // Allocate local particle buffer
+    // Allocate local particle array
     t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
     
-    // Scatter particles to all processes
-    // First, we need to send the counts and displacements for each process
+    // Scatter particles from root to all processes
+    // First, calculate displacement and count arrays for irregular scatter
     int *sendcounts = NULL;
     int *displs = NULL;
     
@@ -991,15 +983,27 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         
         int offset = 0;
         for (int i = 0; i < size; i++) {
-            int proc_np = params.spec_np / size;
-            if (i < remainder) proc_np++;
-            sendcounts[i] = proc_np * sizeof(t_part);
-            displs[i] = offset;
-            offset += sendcounts[i];
+            int count = (params.spec_np / size) + (i < remainder ? 1 : 0);
+            sendcounts[i] = count * sizeof(t_part);
+            displs[i] = offset * sizeof(t_part);
+            offset += count;
         }
     }
     
-    // Scatter the particles
+    // Broadcast EM field arrays to all processes
+    int total_grid_size = spec->nx + 3;  // nx + guard cells (1 left + 2 right)
+    float3 *local_E_part = (float3*) malloc(total_grid_size * sizeof(float3));
+    float3 *local_B_part = (float3*) malloc(total_grid_size * sizeof(float3));
+    
+    if (rank == 0) {
+        memcpy(local_E_part, emf->E_part, total_grid_size * sizeof(float3));
+        memcpy(local_B_part, emf->B_part, total_grid_size * sizeof(float3));
+    }
+    
+    MPI_Bcast(local_E_part, total_grid_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(local_B_part, total_grid_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
+    // Scatter particles using MPI_Scatterv for irregular distribution
     MPI_Scatterv(spec->part, sendcounts, displs, MPI_BYTE,
                  local_part, local_np * sizeof(t_part), MPI_BYTE,
                  0, MPI_COMM_WORLD);
@@ -1009,13 +1013,9 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         free(displs);
     }
     
-    double energy = 0;
-    
-    // Allocate local current buffer with proper guard cells
-    // Note: current->J typically has gc[0]=1, gc[1]=2 as you mentioned
-    int current_size = 1 + params.nx + 2;  // Left guard + nx + right guard
-    float3 *local_J_buf = (float3*) calloc(current_size, sizeof(float3));
-    float3 *local_J = local_J_buf + 1;  // Skip left guard cell
+    // Allocate local current buffer (including guard cells)
+    float3 *local_J = (float3*) malloc(total_grid_size * sizeof(float3));
+    memset(local_J, 0, total_grid_size * sizeof(float3));
     
     // Advance local particles
     for (int i = 0; i < local_np; i++) {
@@ -1032,10 +1032,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uy = local_part[i].uy;
         uz = local_part[i].uz;
 
-        // interpolate fields
-        interpolate_fld(params.emf_E_part, params.emf_B_part, &local_part[i], &Ep, &Bp);
+        // Interpolate fields
+        interpolate_fld(local_E_part, local_B_part, &local_part[i], &Ep, &Bp);
 
-        // advance u using Boris scheme
+        // Advance u using Boris scheme
         Ep.x *= params.tem;
         Ep.y *= params.tem;
         Ep.z *= params.tem;
@@ -1083,30 +1083,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         local_part[i].uy = uy;
         local_part[i].uz = uz;
 
-        // push particle
+        // Push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
         dx = params.dt_dx * rg * ux;
         x1 = local_part[i].x + dx;
-
         di = ltrim(x1);
         x1 -= di;
 
         float qvy = params.spec_q * uy * rg;
         float qvz = params.spec_q * uz * rg;
 
-        // deposit current using Zamb method
-        // Note: This assumes local_J has proper guard cells
-        int global_ix = local_part[i].ix;  // This needs to be adjusted for domain decomposition!
-        
-        // IMPORTANT: You need to handle domain decomposition here!
-        // The particle index needs to be mapped to the local domain
-        // For now, I'll assume we're working on the full domain in each process
-        // (which is wrong for parallelization - you need to fix this!)
-        
+        // Deposit current using Zamb method
+        // Note: current->J points to position 1 in the buffer (after left guard cell)
+        // So we pass local_J + 1 to match this offset
         dep_current_zamb(local_part[i].ix, di,
                         local_part[i].x, dx,
                         params.qnx, qvy, qvz,
-                        local_J);
+                        local_J + 1);  // +1 to skip left guard cell
 
         // Store results
         local_part[i].x = x1;
@@ -1117,27 +1110,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     double total_energy;
     MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Reduce current from all processes
-    // Note: current->J_buf should be allocated on rank 0
-    if (rank == 0) {
-        // Allocate buffer on root if not already allocated
-        if (current->J_buf == NULL) {
-            current->J_buf = (float3*) calloc(current_size, sizeof(float3));
-        } else {
-            memset(current->J_buf, 0, current_size * sizeof(float3));
-        }
-    }
-    
-    // Reduce local currents to root process
-    MPI_Reduce(local_J_buf, current->J_buf, current_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
-    
-    // Set current->J pointer on root
-    if (rank == 0) {
-        current->J = current->J_buf + 1;  // Skip left guard cell
-    }
+    // Reduce current deposition from all processes
+    // All processes contribute to the global current array
+    MPI_Reduce(local_J, current->J_buf, total_grid_size * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     // Gather particles back to root process
-    // First gather the counts from all processes
+    // First, prepare for irregular gather
     int *recvcounts = NULL;
     int *recvdispls = NULL;
     
@@ -1145,50 +1123,30 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         recvcounts = (int*) malloc(size * sizeof(int));
         recvdispls = (int*) malloc(size * sizeof(int));
         
-        // Get counts from all processes
+        int offset = 0;
         for (int i = 0; i < size; i++) {
-            if (i == 0) {
-                recvcounts[i] = local_np * sizeof(t_part);
-                recvdispls[i] = 0;
-            } else {
-                int proc_np;
-                MPI_Recv(&proc_np, 1, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
-                recvcounts[i] = proc_np * sizeof(t_part);
-                recvdispls[i] = (i > 0) ? recvdispls[i-1] + recvcounts[i-1] : 0;
-            }
+            int count = (params.spec_np / size) + (i < remainder ? 1 : 0);
+            recvcounts[i] = count * sizeof(t_part);
+            recvdispls[i] = offset * sizeof(t_part);
+            offset += count;
         }
-    } else {
-        // Send local_np to root
-        MPI_Send(&local_np, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
     }
     
-    // Broadcast recvcounts and recvdispls from root to all processes
-    if (rank == 0) {
-        for (int i = 1; i < size; i++) {
-            MPI_Send(recvcounts, size, MPI_INT, i, 1, MPI_COMM_WORLD);
-            MPI_Send(recvdispls, size, MPI_INT, i, 2, MPI_COMM_WORLD);
-        }
-    } else {
-        recvcounts = (int*) malloc(size * sizeof(int));
-        recvdispls = (int*) malloc(size * sizeof(int));
-        MPI_Recv(recvcounts, size, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-        MPI_Recv(recvdispls, size, MPI_INT, 0, 2, MPI_COMM_WORLD, &status);
-    }
-    
-    // Gather particles using Gatherv
+    // Gather particles back to root
     MPI_Gatherv(local_part, local_np * sizeof(t_part), MPI_BYTE,
                 spec->part, recvcounts, recvdispls, MPI_BYTE,
                 0, MPI_COMM_WORLD);
     
-    // Clean up
-    free(local_J_buf);
-    free(local_part);
-    if (recvcounts) free(recvcounts);
-    if (recvdispls) free(recvdispls);
-
-    // Only root process handles the rest (boundaries, sorting, etc.)
+    // Free temporary arrays
+    free(local_J);
+    free(local_E_part);
+    free(local_B_part);
+    
     if (rank == 0) {
-        // Store energy
+        free(recvcounts);
+        free(recvdispls);
+        
+        // Store energy (only on root)
         spec->energy = spec->q * spec->m_q * total_energy * spec->dx;
 
         // Advance internal iteration number
@@ -1211,8 +1169,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         } else {
             // Use periodic boundaries in x
             for (int i = 0; i < spec->np; i++) {
-                spec->part[i].ix += ((spec->part[i].ix < 0) ? nx0 : 0) - 
-                                   ((spec->part[i].ix >= nx0) ? nx0 : 0);
+                spec->part[i].ix += ((spec->part[i].ix < 0) ? nx0 : 0) - ((spec->part[i].ix >= nx0) ? nx0 : 0);
             }
         }
 
@@ -1220,16 +1177,16 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         if (spec->n_sort > 0) {
             if (!(spec->iter % spec->n_sort)) spec_sort(spec);
         }
-    }
 
-    // Timing info (only on root process)
-    if (rank == 0) {
+        // Timing info (only on root)
         _spec_npush += spec->np;
         _spec_time += timer_interval_seconds(t0, timer_ticks());
     }
     
-    // Broadcast updated particle count to all processes for next iteration
-    MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    free(local_part);
+    
+    // Synchronize all processes before continuing
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
 /*********************************************************************************************
