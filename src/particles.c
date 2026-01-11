@@ -896,14 +896,13 @@ int ltrim( float x )
 }
 
 typedef struct {
-    float3 *emf_E_part;
-    float3 *emf_B_part;
     float spec_q;
-    float spec_np;
+    int spec_np;
     float tem;
     float dt_dx;
     float qnx;
     int nx;
+    int emf_size;  // Size of EMF arrays to broadcast
 } t_particle_params;
 
 /**
@@ -945,19 +944,37 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const int nx0 = spec -> nx;
 
-    // Turn it into a struct for Broadcast to avoid having 8 of them
+    // Calculate EMF array size (includes guard cells)
+    int emf_size = emf->gc[0] + emf->nx + emf->gc[1];
+
+    // Turn it into a struct for Broadcast (no pointers!)
     t_particle_params params = {
-        .emf_E_part = emf -> E_part,
-        .emf_B_part = emf -> B_part,
         .spec_q     = spec -> q,
-        .spec_np     = spec -> np,
+        .spec_np    = spec -> np,
         .tem        = tem,
         .dt_dx      = dt_dx,
         .qnx        = qnx,
-        .nx         = spec -> nx
+        .nx         = spec -> nx,
+        .emf_size   = emf_size
     };
 
     MPI_Bcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    // Allocate and broadcast EMF field data
+    float3 *local_E_buf = (float3*) malloc(params.emf_size * sizeof(float3));
+    float3 *local_B_buf = (float3*) malloc(params.emf_size * sizeof(float3));
+
+    if (rank == 0) {
+        memcpy(local_E_buf, emf->E_buf, params.emf_size * sizeof(float3));
+        memcpy(local_B_buf, emf->B_buf, params.emf_size * sizeof(float3));
+    }
+
+    MPI_Bcast(local_E_buf, params.emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(local_B_buf, params.emf_size * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    // Offset pointers like emf->E_part does (by gc[0] = 1)
+    float3 *local_E = local_E_buf + 1;
+    float3 *local_B = local_B_buf + 1;
 
     int local_np = params.spec_np / size;
 
@@ -997,7 +1014,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = local_part[i].uz;
 
         // interpolate fields
-        interpolate_fld( params.emf_E_part, params.emf_B_part, &local_part[i], &Ep, &Bp );
+        interpolate_fld( local_E, local_B, &local_part[i], &Ep, &Bp );
         // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
@@ -1091,6 +1108,8 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     free(local_J_buf);
     free(local_part);
+    free(local_E_buf);
+    free(local_B_buf);
 
     // Store energy
     spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
