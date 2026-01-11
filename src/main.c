@@ -40,6 +40,7 @@ along with the ZPIC Educational code suite. If not, see <http://www.gnu.org/lice
 //#include "input/density.c"
 
 int main (int argc, const char * argv[]) {
+    MPI_Init(&argc, &argv);
 
 	// Initialize simulation
 	t_simulation sim;
@@ -85,6 +86,8 @@ int main (int argc, const char * argv[]) {
 
     // Cleanup data
     sim_delete( &sim );
+
+    MPI_Finalize();
     
 	return 0;
 }

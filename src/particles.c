@@ -707,7 +707,7 @@ void dep_current_esk( int ix0, int di,
 void dep_current_zamb( int ix0, int di,
                         float x0, float dx,
                         float qnx, float qvy, float qvz,
-                        t_current *current )
+                        float3 *J )
 {
     // Split the particle trajectory
     typedef struct {
@@ -756,9 +756,6 @@ void dep_current_zamb( int ix0, int di,
         vnp++;
 
     }
-
-    // Deposit virtual particle currents
-    float3* restrict const J = current -> J;
 
     for (int k = 0; k < vnp; k++) {
         float S0x[2], S1x[2];
@@ -898,6 +895,17 @@ int ltrim( float x )
     return ( x >= 1.0f ) - ( x < 0.0f );
 }
 
+typedef struct {
+    float3 *emf_E_part;
+    float3 *emf_B_part;
+    float spec_q;
+    float spec_np;
+    float tem;
+    float dt_dx;
+    float qnx;
+    int nx;
+} t_particle_params;
+
 /**
  * @brief Advance Particle species 1 timestep
  * 
@@ -918,6 +926,11 @@ int ltrim( float x )
  */
 void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
+    int rank, size;
+    MPI_Status status;
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     uint64_t t0;
     t0 = timer_ticks();
@@ -930,10 +943,38 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     const int nx0 = spec -> nx;
 
+    // Turn it into a struct for Broadcast to avoid having 8 of them
+    t_particle_params params = {
+        .emf_E_part = emf -> E_part,
+        .emf_B_part = emf -> B_part,
+        .spec_q     = spec -> q,
+        .spec_np     = spec -> np,
+        .tem        = tem,
+        .dt_dx      = dt_dx,
+        .qnx        = qnx,
+        .nx         = spec -> nx
+    };
+
+    MPI_Broadcast(&params, sizeof(t_particle_params), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    int local_np = params.spec_np / size;
+
+    // Store part in a local variable to avoid sending all of spec
+    t_part *local_part = (t_part*) malloc(local_np * sizeof(t_part));
+
+    MPI_Scatter(spec->part, local_np * sizeof(t_part), MPI_BYTE,
+                local_part, local_np * sizeof(t_part), MPI_BYTE,
+                0, MPI_COMM_WORLD);
+
+                
     double energy = 0;
+    
+    // Allocate local current buffer
+    float3 *local_J = (float3*) malloc(params.nx * sizeof(float3));
+    memset(local_J, 0, params.nx * sizeof(float3));
 
     // Advance particles
-    for (int i=0; i<spec->np; i++) {
+    for (int i=0; i<local_np; i++) {
 
         float3 Ep, Bp;
         float utx, uty, utz;
@@ -946,18 +987,18 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = spec -> part[i].ux;
-        uy = spec -> part[i].uy;
-        uz = spec -> part[i].uz;
+        ux = local_part.ux;
+        uy = local_part.uy;
+        uz = local_part.uz;
 
         // interpolate fields
-        interpolate_fld( emf -> E_part, emf -> B_part, &spec -> part[i], &Ep, &Bp );
+        interpolate_fld( params.emf_E_part, params.emf_B_part, &local_part, &Ep, &Bp );
         // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
-        Ep.x *= tem;
-        Ep.y *= tem;
-        Ep.z *= tem;
+        Ep.x *= params.tem;
+        Ep.y *= params.tem;
+        Ep.z *= params.tem;
 
         utx = ux + Ep.x;
         uty = uy + Ep.y;
@@ -971,7 +1012,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // Accumulate time centered energy
         energy += u2 / ( 1 + gamma );
 
-        gtem = tem / gamma;
+        gtem = params.tem / gamma;
 
         Bp.x *= gtem;
         Bp.y *= gtem;
@@ -999,23 +1040,23 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        spec -> part[i].ux = ux;
-        spec -> part[i].uy = uy;
-        spec -> part[i].uz = uz;
+        local_part.ux = ux;
+        local_part.uy = uy;
+        local_part.uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
-        dx = dt_dx * rg * ux;
+        dx = params.dt_dx * rg * ux;
 
-        x1 = spec -> part[i].x + dx;
+        x1 = local_part.x + dx;
 
         di = ltrim(x1);
 
         x1 -= di;
 
-        float qvy = spec->q * uy * rg;
-        float qvz = spec->q * uz * rg;
+        float qvy = params.spec_q * uy * rg;
+        float qvz = params.spec_q * uz * rg;
 
         // deposit current using Eskirepov method
         // dep_current_esk( spec -> part[i].ix, di,
@@ -1023,19 +1064,31 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // 				 qnx, qvy, qvz,
         // 				 current );
 
-        dep_current_zamb( spec -> part[i].ix, di,
-                         spec -> part[i].x, dx,
-                         qnx, qvy, qvz,
-                         current );
+        dep_current_zamb( local_part.ix, di,
+                         local_part.x, dx,
+                         params.qnx, qvy, qvz,
+                         local_J );
 
         // Store results
-        spec -> part[i].x = x1;
-        spec -> part[i].ix += di;
+        local_part.x = x1;
+        local_part.ix += di;
 
     }
 
+    double total_energy;
+    MPI_Reduce(&energy, &total_energy, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(local_J, current->J, params.nx * 3, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    MPI_Gather(local_part, local_np * sizeof(t_part), MPI_BYTE,
+            spec->part, local_np * sizeof(t_part), MPI_BYTE,
+            0, MPI_COMM_WORLD);
+
+    free(local_J);
+    free(local_part);
+
     // Store energy
-    spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
+    spec -> energy = spec-> q * spec -> m_q * total_energy * spec -> dx;
 
     // Advance internal iteration number
     spec -> iter += 1;
