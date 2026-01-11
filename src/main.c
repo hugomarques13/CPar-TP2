@@ -70,10 +70,10 @@ int main (int argc, const char * argv[]) {
         
         // Apenas master faz report
         if (rank == 0 && report(n, sim.ndump)) {
-            sim_report(&sim);
+            sim_report(&sim, rank, size);
         }
 
-        sim_iter(&sim, rank, size);  // spec_advance paralelizado aqui
+        sim_iter(&sim);  // spec_advance paralelizado aqui
 
         if (n==0) {
             sim_report_energy_ret(&sim, &en_in);
