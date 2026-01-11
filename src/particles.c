@@ -987,12 +987,12 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         float dx;
 
         // Load particle momenta
-        ux = local_part.ux;
-        uy = local_part.uy;
-        uz = local_part.uz;
+        ux = local_part[i].ux;
+        uy = local_part[i].uy;
+        uz = local_part[i].uz;
 
         // interpolate fields
-        interpolate_fld( params.emf_E_part, params.emf_B_part, &local_part, &Ep, &Bp );
+        interpolate_fld( params.emf_E_part, params.emf_B_part, &local_part[i], &Ep, &Bp );
         // Ep.x = Ep.y = Ep.z = Bp.x = Bp.y = Bp.z = 0;
 
         // advance u using Boris scheme
@@ -1040,16 +1040,16 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         uz = utz + Ep.z;
 
         // Store new momenta
-        local_part.ux = ux;
-        local_part.uy = uy;
-        local_part.uz = uz;
+        local_part[i].ux = ux;
+        local_part[i].uy = uy;
+        local_part[i].uz = uz;
 
         // push particle
         rg = 1.0f / sqrtf(1.0f + ux*ux + uy*uy + uz*uz);
 
         dx = params.dt_dx * rg * ux;
 
-        x1 = local_part.x + dx;
+        x1 = local_part[i].x + dx;
 
         di = ltrim(x1);
 
@@ -1064,14 +1064,14 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // 				 qnx, qvy, qvz,
         // 				 current );
 
-        dep_current_zamb( local_part.ix, di,
-                         local_part.x, dx,
+        dep_current_zamb( local_part[i].ix, di,
+                         local_part[i].x, dx,
                          params.qnx, qvy, qvz,
                          local_J );
 
         // Store results
-        local_part.x = x1;
-        local_part.ix += di;
+        local_part[i].x = x1;
+        local_part[i].ix += di;
 
     }
 
