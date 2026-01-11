@@ -4,4 +4,4 @@
 #SBATCH --ntasks=2
 #SBATCH --time=00:04:00
 
-mpirun -np 2 ./zpic
+srun ./zpic

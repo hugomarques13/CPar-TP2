@@ -14,7 +14,7 @@
 #include "emf.h"
 #include "current.h"
 
-#include "mpi.h"
+#include <mpi.h>
 
 #include <stdint.h>
 
