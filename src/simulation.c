@@ -42,11 +42,11 @@ int report( int n, int ndump )
  * 
  * @param sim 	EM1D Simulation
  */
-void sim_iter( t_simulation* sim, rank, size) {
+void sim_iter( t_simulation* sim ) {
 	// Advance particles and deposit current
 	current_zero( &sim -> current );
 	for (int i = 0; i<sim -> n_species; i++)
-		spec_advance(&sim -> species[i], &sim -> emf, &sim -> current, rank, size);
+		spec_advance(&sim -> species[i], &sim -> emf, &sim -> current );
 
 	// Update current boundary conditions and advance iteration
 	current_update( &sim -> current );

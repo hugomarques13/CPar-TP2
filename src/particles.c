@@ -925,8 +925,8 @@ typedef struct {
  * @param current   Current density
  */
 
-// static int _mpi_initialized = 0;
-void spec_advance( t_species* spec, t_emf* emf, t_current* current, int rank, int size);
+static int _mpi_initialized = 0;
+void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 {
     /*
     if (!_mpi_initialized) {
