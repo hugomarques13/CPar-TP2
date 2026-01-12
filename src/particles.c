@@ -26,6 +26,9 @@
 static double _spec_time = 0.0;
 static uint64_t _spec_npush = 0;
 
+// MPI datatype for particle broadcast (created once during initialization)
+static MPI_Datatype MPI_PARTICLE = MPI_DATATYPE_NULL;
+
 void spec_sort( t_species *spec );
 void spec_move_window( t_species *spec );
 
@@ -580,6 +583,12 @@ void spec_new( t_species* spec, char name[], const float m_q, const int ppc,
 
     // Default to periodic boundary condtions
     spec -> bc_type = PART_BC_PERIODIC;
+
+    // Initialize MPI datatype once (only if not already created)
+    if (MPI_PARTICLE == MPI_DATATYPE_NULL) {
+        MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
+        MPI_Type_commit(&MPI_PARTICLE);
+    }
 
 }
 
