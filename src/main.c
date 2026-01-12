@@ -54,7 +54,10 @@ int main (int argc, char ** argv) {
 	float t;
     double en_in, en_out;
     
-	if (rank == 0) printf("Starting simulation ...\n\n");
+	if (rank == 0) {
+		printf("Starting simulation ...\n\n");
+		fflush(stdout);
+	}
 
 	uint64_t t0,t1;
 	t0 = timer_ticks();
