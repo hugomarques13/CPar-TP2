@@ -4,4 +4,5 @@
 #SBATCH --ntasks=14
 #SBATCH --time=00:04:00
 
+ml OpenMPI
 srun ./zpic
