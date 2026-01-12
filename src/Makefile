@@ -44,11 +44,7 @@ $(DOCS) : $(SOURCE)
 	@doxygen ./Doxyfile
 
 run: ./$(TARGET)
-	@srun -A f202500010hpcvlabuminhoa --time=00:10:00 --nodes=1 -n4 -p normal-arm --pty bash -c "\
-		ml OpenMPI; \
-		make clean; \
-		make; \
-		sbatch $(SBATCH_FILE);"
+	sbatch $(SBATCH_FILE)
 
 clean:
 	@touch $(TARGET) $(OBJ)
