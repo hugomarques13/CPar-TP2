@@ -944,7 +944,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
 
     double energy = 0;
 
-    // Get MPI rank and size
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -954,7 +953,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     int particles_per_rank = np_total / size;
     int remainder = np_total % size;
     
-    // Distribute remainder among first 'remainder' ranks
     int start_idx = rank * particles_per_rank + (rank < remainder ? rank : remainder);
     int end_idx = start_idx + particles_per_rank + (rank < remainder ? 1 : 0);
 
@@ -973,7 +971,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Create a temporary current structure pointing to local buffer
     t_current local_current = *current;
     local_current.J_buf = local_J;
-    local_current.J = local_J + current->gc[0];  // Point to cell [0]
+    local_current.J = local_J + current->gc[0];
 
     double local_energy = 0;
 
@@ -1080,12 +1078,11 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     }
 
     // Reduce local current buffers across all ranks
-    // Use a temporary buffer to store the reduced result, then ADD to global current
-    // This ensures multiple species accumulate correctly
+    // Use a temporary buffer to store the reduced result, then add to global current
     float3 *reduced_J = (float3*) malloc(J_size * sizeof(float3));
     MPI_Allreduce(local_J, reduced_J, J_size * 3, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
     
-    // Add reduced current to global current buffer (preserves contributions from other species)
+    // Add reduced current to global current buffer
     for (int j = 0; j < J_size; j++) {
         current->J_buf[j].x += reduced_J[j].x;
         current->J_buf[j].y += reduced_J[j].y;
@@ -1115,13 +1112,10 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Advance internal iteration number
     spec -> iter += 1;
 
-    // Boundary conditions and sorting are done by rank 0 and broadcast
-    // This ensures consistent particle array state across all ranks
-
     // Check for particles leaving the box
     if ( spec -> moving_window || spec -> bc_type == PART_BC_OPEN ){
 
-        // Move simulation window if needed (rank 0 only to avoid duplicate work)
+        // Move simulation window if needed
         if (spec -> moving_window && rank == 0) spec_move_window( spec );
 
         // Use absorbing boundaries along x
