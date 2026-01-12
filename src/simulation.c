@@ -44,15 +44,21 @@ int report( int n, int ndump )
  */
 void sim_iter( t_simulation* sim ) {
 	// Advance particles and deposit current
+	int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
 	current_zero( &sim -> current );
 	for (int i = 0; i<sim -> n_species; i++)
 		spec_advance(&sim -> species[i], &sim -> emf, &sim -> current );
 
-	// Update current boundary conditions and advance iteration
-	current_update( &sim -> current );
+    if (rank == 0) {
+        // Update current boundary conditions and advance iteration
+        current_update( &sim -> current );
 
-	// Advance EM fields
-	emf_advance( &sim -> emf, &sim -> current );
+        // Advance EM fields
+        emf_advance( &sim -> emf, &sim -> current );
+    }
 }
 
 /**
