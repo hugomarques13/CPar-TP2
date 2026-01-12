@@ -1125,7 +1125,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         // Move simulation window if needed (rank 0 only to avoid duplicate work)
         if (spec -> moving_window && rank == 0) spec_move_window( spec );
 
-        // Use absorbing boundaries along x (all ranks do this identically)
+        // Use absorbing boundaries along x
         if (rank == 0) {
             int i = 0;
             while ( i < spec -> np ) {
@@ -1137,24 +1137,20 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
             }
         }
 
-    } else {
-        // Use periodic boundaries in x (all ranks can do this identically)
-        for (int i=0; i<spec->np; i++) {
-            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
-        }
-    }
+        // Synchronize np (number of particles) after boundary handling
+        MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Synchronize np (number of particles) after boundary handling
-    MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // If particles were removed, synchronize the particle array from rank 0
-    if (spec -> moving_window || spec -> bc_type == PART_BC_OPEN) {
         // Broadcast updated particle data from rank 0
         MPI_Datatype MPI_PARTICLE_BC;
         MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE_BC);
         MPI_Type_commit(&MPI_PARTICLE_BC);
         MPI_Bcast(spec->part, spec->np, MPI_PARTICLE_BC, 0, MPI_COMM_WORLD);
         MPI_Type_free(&MPI_PARTICLE_BC);
+    } else {
+        // Use periodic boundaries in x (all ranks can do this identically)
+        for (int i=0; i<spec->np; i++) {
+            spec -> part[i].ix += (( spec -> part[i].ix < 0 ) ? nx0 : 0 ) - (( spec -> part[i].ix >= nx0 ) ? nx0 : 0);
+        }
     }
 
     // Sort species at every n_sort time steps
