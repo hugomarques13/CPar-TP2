@@ -49,6 +49,10 @@ int main (int argc, char ** argv) {
 	t_simulation sim;
 	sim_init( &sim );
 
+    MPI_Datatype MPI_PARTICLE;
+    MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
+    MPI_Type_commit(&MPI_PARTICLE);
+
     // Run simulation
 	int n;
 	float t;
@@ -99,6 +103,7 @@ int main (int argc, char ** argv) {
     
     // Cleanup data
     sim_delete( &sim );
+    MPI_Type_free(&MPI_PARTICLE_BC);
     MPI_Finalize();
 	return 0;
 }

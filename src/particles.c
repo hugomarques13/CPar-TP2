@@ -1090,15 +1090,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
     // Free local current buffer
     free(local_J);
 
-    // Synchronize particle data across all ranks
-    // Each rank has updated only its assigned particles, need to share updates
-    // We use MPI_Bcast from each rank for its portion (simpler and more reliable)
-    
-    // Create MPI datatype for t_part structure
-    MPI_Datatype MPI_PARTICLE;
-    MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE);
-    MPI_Type_commit(&MPI_PARTICLE);
-
     // Each rank broadcasts its updated particles to all other ranks
     for (int r = 0; r < size; r++) {
         int r_particles = particles_per_rank + (r < remainder ? 1 : 0);
@@ -1108,7 +1099,6 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         MPI_Bcast(&spec->part[r_start], r_particles, MPI_PARTICLE, r, MPI_COMM_WORLD);
     }
     
-    MPI_Type_free(&MPI_PARTICLE);
 
     // Store energy
     spec -> energy = spec-> q * spec -> m_q * energy * spec -> dx;
@@ -1141,11 +1131,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
         MPI_Bcast(&spec->np, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
         // Broadcast updated particle data from rank 0
-        MPI_Datatype MPI_PARTICLE_BC;
-        MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE_BC);
-        MPI_Type_commit(&MPI_PARTICLE_BC);
-        MPI_Bcast(spec->part, spec->np, MPI_PARTICLE_BC, 0, MPI_COMM_WORLD);
-        MPI_Type_free(&MPI_PARTICLE_BC);
+        MPI_Bcast(spec->part, spec->np, MPI_PARTICLE, 0, MPI_COMM_WORLD);
     } else {
         // Use periodic boundaries in x (all ranks can do this identically)
         for (int i=0; i<spec->np; i++) {
@@ -1160,11 +1146,7 @@ void spec_advance( t_species* spec, t_emf* emf, t_current* current )
             if (rank == 0) spec_sort( spec );
             
             // Broadcast sorted particle array
-            MPI_Datatype MPI_PARTICLE_SORT;
-            MPI_Type_contiguous(sizeof(t_part), MPI_BYTE, &MPI_PARTICLE_SORT);
-            MPI_Type_commit(&MPI_PARTICLE_SORT);
-            MPI_Bcast(spec->part, spec->np, MPI_PARTICLE_SORT, 0, MPI_COMM_WORLD);
-            MPI_Type_free(&MPI_PARTICLE_SORT);
+            MPI_Bcast(spec->part, spec->np, MPI_PARTICLE, 0, MPI_COMM_WORLD);
         }
     }
 
