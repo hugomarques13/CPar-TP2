@@ -54,14 +54,14 @@ int main (int argc, char ** argv) {
 	float t;
     double en_in, en_out;
     
-	if (rank == 0) {
-		printf("Starting simulation ...\n\n");
-		fflush(stdout);
-	}
+	if (rank == 0) printf("Starting simulation ...\n\n");
 
 	uint64_t t0,t1;
 	t0 = timer_ticks();
-    if (rank == 0) printf("n = 0, t = 0.0\n");
+    if (rank == 0) {
+        printf("n = 0, t = 0.0\n");
+        fflush(stdout);
+    }
 
 	for (n=0,t=0.0; t<=sim.tmax; n++, t=n*sim.dt) {
         //printf("n = %i, t = %f\n",n,t);
@@ -73,18 +73,24 @@ int main (int argc, char ** argv) {
         if (n==0 && rank == 0){
             sim_report_energy_ret( &sim, &en_in);
             sim_report_energy (&sim);
+            fflush(stdout);
         }
 	}
     
     if (rank == 0) {
         printf("n = %i, t = %f\n",n,t);
+        fflush(stdout);
         t1 = timer_ticks();
         fprintf(stderr, "\nSimulation ended.\n\n");
+        fflush(stderr);
         sim_report_energy( &sim );
+        fflush(stdout);
         sim_report_energy_ret( &sim, &en_out );
         printf("Initial energy: %e, Final energy: %e\n", en_in, en_out);
+        fflush(stdout);
         double ratio=100*fabs((en_in-en_out)/en_out);
         printf("\nFinal energy different from Initial Energy. Change in total energy is: %.2f %% \n",ratio);
+        fflush(stdout);
         if (ratio>5) { printf("ERROR: Large Change\n"); sim_delete( &sim ); MPI_Finalize(); return 1; }
         
         // Simulation times
